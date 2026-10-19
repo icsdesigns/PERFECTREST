@@ -97,10 +97,13 @@ export interface KnownNight {
 /** Peso de una propuesta sin revisar, en la misma escala que usa la elección de noche. */
 const CONFIDENCE_RANK: Record<Confidence, number> = { high: 0.8, medium: 0.55, low: 0.3 };
 
+/** Peso de una sesión sin revisar: su confianza y, a igualdad, lo larga que es. */
+const sessionRank = (s: SleepSession) =>
+  CONFIDENCE_RANK[s.confidence] + Math.min(s.end - s.start, 10 * HOUR) / (40 * HOUR);
+
 /** Convierte las sesiones del store en las noches que la evaluación ya da por existentes. */
 export function knownNights(sessions: SleepSession[], pending: SleepSession[] = []): KnownNight[] {
-  const rank = (s: SleepSession) =>
-    CONFIDENCE_RANK[s.confidence] + Math.min(s.end - s.start, 10 * HOUR) / (40 * HOUR);
+  const rank = sessionRank;
   return [
     ...sessions.map((s) => ({
       start: s.start,
@@ -745,6 +748,22 @@ function gapOf(r: DetectionResult): NativeGap {
     startTrigger: trigger,
     endTrigger: trigger,
   };
+}
+
+/**
+ * ¿Deja la propuesta nueva sin sentido a una que aún espera en la cola?
+ *
+ * Pasa cuando se abre la app al coger el móvil para irse a la cama: la tarde
+ * quieta se propone en ese momento y la noche de verdad llega por la mañana.
+ * La noche ya se eligió como principal frente a la tarde (`pickMainNights`),
+ * pero la tarde seguía en la cola, la primera, esperando a que alguien la
+ * descartara. Ninguna de las dos es una siesta y la nueva es claramente mejor.
+ */
+export function supersedesPending(incoming: SleepSession, pending: SleepSession): boolean {
+  if (incoming.nap || pending.nap) return false;
+  if (incoming.source !== 'auto' || pending.source !== 'auto') return false;
+  if (nightKey(incoming.start, incoming.end) !== nightKey(pending.start, pending.end)) return false;
+  return sessionRank(incoming) > sessionRank(pending) + BETTER_NIGHT_MARGIN;
 }
 
 /** Noche a la que pertenece un tramo: el día que empieza al mediodía anterior a su punto medio. */

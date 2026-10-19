@@ -17,6 +17,7 @@ import {
   proposeFromSchedule,
   readScheduleMark,
   refineEdges,
+  supersedesPending,
   startMonitor,
   writeScheduleMark,
   type DetectionResult,
@@ -132,9 +133,13 @@ function reducer(state: AppState, action: Action): AppState {
       );
       if (overlaps || alreadyPending) return state;
 
+      // La tarde quieta que se propuso anoche sobra si llega la noche de verdad.
+      const queue = state.pendingSessions.filter((s) => !supersedesPending(action.session, s));
+
       if (state.monitor.autoConfirm) {
         return {
           ...state,
+          pendingSessions: queue,
           sessions: [...state.sessions, { ...action.session, confirmed: true }].sort(
             (a, b) => b.end - a.end,
           ),
@@ -142,9 +147,7 @@ function reducer(state: AppState, action: Action): AppState {
       }
       return {
         ...state,
-        pendingSessions: [...state.pendingSessions, action.session].sort(
-          (a, b) => a.end - b.end,
-        ),
+        pendingSessions: [...queue, action.session].sort((a, b) => a.end - b.end),
       };
     }
 

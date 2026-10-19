@@ -15,6 +15,7 @@ import {
   evaluateGap,
   evaluateGaps,
   refineEdges,
+  supersedesPending,
 } from '../src/lib/activityMonitor';
 import type { NativeGap } from '../src/lib/backgroundMonitor';
 import { learnHabit, learnLatency, circularMean, circularSpread, minuteDiff } from '../src/lib/habit';
@@ -220,6 +221,21 @@ console.log('\n--- Precisión: una noche principal por día ---');
     known: [{ start: at('2026-09-25T20:30:00'), end: at('2026-09-26T07:00:00') }],
   });
   assert('pero una noche firme del mismo día sí', firm.results.length === 0);
+
+  // Y en la cola: la tarde que se propuso al irse a la cama deja su sitio a la
+  // noche que llega por la mañana, en vez de quedarse la primera esperando.
+  const auto = (from: string, to: string, extra: Partial<SleepSession> = {}): SleepSession => ({
+    id: `auto-${at(from)}`, start: at(from), end: at(to), source: 'auto', confidence: 'medium',
+    confirmed: false, ...extra,
+  });
+  const tardePendiente = auto('2026-09-25T20:30:00', '2026-09-25T23:20:00', { confidence: 'low' });
+  const nocheNueva = auto('2026-09-25T23:45:00', '2026-09-26T07:30:00', { confidence: 'high' });
+  assert('la noche de verdad sustituye en la cola a la tarde sin revisar',
+    supersedesPending(nocheNueva, tardePendiente));
+  assert('pero no a una siesta', !supersedesPending(nocheNueva, { ...tardePendiente, nap: true }));
+  assert('ni a la noche de otro día',
+    !supersedesPending(nocheNueva, auto('2026-09-24T23:00:00', '2026-09-25T07:00:00', { confidence: 'low' })));
+  assert('ni la tarde a la noche', !supersedesPending(tardePendiente, nocheNueva));
 
   const withKnown = evaluateGaps([gap('2026-09-26T13:00:00', '2026-09-26T17:30:00')], MON, {
     known: [{ start: at('2026-09-25T23:00:00'), end: at('2026-09-26T07:00:00') }],

@@ -588,10 +588,13 @@ const BEDTIME_WAKE_REACH_MIN = 150;
  * por detrás, ahí empieza el sueño. Lo mismo, a la fuerza, con los huecos que
  * pasan del techo: el que deja un tramo creíble más cerca de tu hora.
  *
- * Por el final: un desbloqueo de segundos en los últimos tres cuartos de hora
- * antes del uso sostenido es casi siempre alguien que ya estaba despierto —
- * mirar la hora, parar la alarma — y se levantó sin coger el móvil. Despertar
- * es lo primero de esa cadena.
+ * Por el final: un desbloqueo de segundos en la hora y cuarto anterior al uso
+ * sostenido (`LATE_WAKE_PULL_MS`, encadenando los que haya) es casi siempre
+ * alguien que ya estaba despierto —mirar la hora, parar la alarma— y se
+ * levantó sin coger el móvil. Despertar es lo primero de esa cadena. Es una
+ * apuesta sin calibrar: quien mira la hora a las 06:50 y vuelve a dormirse
+ * hasta las 08:00 pierde esa hora; el registro bruto exportado es lo que
+ * permitirá ajustarla con noches reales.
  */
 function trimGap(
   gap: NativeGap,

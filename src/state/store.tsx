@@ -20,7 +20,9 @@ import {
   writeScheduleMark,
   type DetectionResult,
 } from '../lib/activityMonitor';
+import { learnHabit, learnLatency } from '../lib/habit';
 import { DEFAULT_TRIGGERS } from '../lib/triggers';
+import { DEFAULT_SENSORS, activeSensors } from '../lib/sensors';
 import { logEvent } from '../lib/triggerLog';
 import { ensureChannel, rescheduleAll, scheduleForegroundReminders } from '../lib/notifications';
 import {
@@ -55,6 +57,7 @@ export const initialState: AppState = {
     background: true,
     wakeSummary: true,
     triggers: DEFAULT_TRIGGERS,
+    sensors: DEFAULT_SENSORS,
   },
   sessions: [],
   theme: 'dark',
@@ -212,6 +215,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
               // posterior debe estrenarse con su valor por defecto en vez de
               // desaparecer bajo el objeto guardado.
               triggers: { ...DEFAULT_TRIGGERS, ...stored.monitor?.triggers },
+              sensors: { ...DEFAULT_SENSORS, ...stored.monitor?.sensors },
             },
             sessions: stored.sessions ?? [],
             // Las propuestas sí sobreviven al cierre de la app. No se pueden
@@ -254,13 +258,28 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     if (!ready) return;
     void ensureChannel();
 
+    // Lo que la detección sabe de ti: a qué hora te acuestas y cuánto tardas
+    // en dormirte, aprendido de las noches que has corregido o aceptado.
+    const habitNow = () => learnHabit(stateRef.current.sessions, stateRef.current.schedule);
+
     const propose = (result: DetectionResult) => {
-      const refined = refineEdges(result.session, stateRef.current.cycles.latencyMinutes);
+      const { cycles, sessions } = stateRef.current;
+      const habit = habitNow();
+      const refined = refineEdges(result.session, cycles.latencyMinutes, {
+        learnedLatencyMinutes: learnLatency(sessions),
+        // Si un sensor ya dijo cuándo se apagó la luz o se paró la actividad,
+        // eso manda sobre lo que se espera de ti.
+        habit: result.evidence?.activityAt != null ? null : habit,
+      });
       dispatch({ type: 'proposeSession', session: refined });
     };
 
     const handle = startMonitor(() => stateRef.current.monitor, {
       onDetect: propose,
+      getContext: () => ({
+        habit: habitNow(),
+        known: [...stateRef.current.sessions, ...stateRef.current.pendingSessions],
+      }),
       onBeat: (ts) => dispatch({ type: 'patch', patch: { lastActiveAt: ts } }),
       onDeviceUse: (ts) => dispatch({ type: 'patch', patch: { lastDeviceUseAt: ts } }),
       // Ninguna señal esta vez: es el turno del disparador de horario, que
@@ -314,6 +333,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         wakeSummary,
         nightStartMinutes: parseTime(state.monitor.nightStart),
         nightEndMinutes: parseTime(state.monitor.nightEnd),
+        sensors: activeSensors(state.monitor),
       }).then((running) => {
         // Que el servicio no arranque es silencioso y es la causa número uno
         // de no detectar nada: aquí es donde deja de serlo.

@@ -1,5 +1,7 @@
 import { Capacitor, registerPlugin } from '@capacitor/core';
-import type { TriggerEvent, TriggerId } from './types';
+import { cleanRawEvents, type RawEvent } from './rawEvents';
+import { NO_SENSORS, type SensorStatus } from './sensors';
+import type { SensorId, TriggerEvent, TriggerId } from './types';
 
 /**
  * Acceso al servicio nativo de monitorización en segundo plano.
@@ -20,6 +22,11 @@ export interface NativeGap {
   startTrigger: TriggerId;
   /** Disparador que la cerró. */
   endTrigger: TriggerId;
+  /**
+   * Micro-despertares: desbloqueos de segundos dentro de la noche que el
+   * servicio no tomó por el final porque el uso no llegó a ser sostenido.
+   */
+  wakes?: number[];
 }
 
 /**
@@ -86,6 +93,8 @@ interface SleepMonitorPlugin {
     /** Ventana nocturna en minutos desde medianoche, para filtrar ese aviso. */
     nightStartMinutes: number;
     nightEndMinutes: number;
+    /** Sensores opcionales activos; el servicio sólo registra los de la lista. */
+    sensors?: SensorId[];
   }): Promise<{ running: boolean }>;
   stop(): Promise<{ running: boolean }>;
   isRunning(): Promise<MonitorStatus>;
@@ -98,6 +107,13 @@ interface SleepMonitorPlugin {
   removeNotes(options: { ids: number[] }): Promise<void>;
   /** Publica el aviso al despertar nativo, con su botón «Comentar». */
   notifySummary(options: { start: number; end: number }): Promise<void>;
+  /** Registro bruto (pantalla, cargador, sensores), para cruzarlo con los huecos y exportarlo. */
+  getRawEvents(): Promise<{ events: RawEvent[] }>;
+  clearRawEvents(): Promise<void>;
+  /** Qué sensores tiene el móvil y cuáles puede usar con los permisos actuales. */
+  sensorStatus(): Promise<{ sensors: SensorStatus }>;
+  /** Pide el permiso «Actividad física» (pasos). Devuelve si quedó concedido. */
+  requestSensorPermission(): Promise<{ granted: boolean }>;
   /** Registro de eventos del servicio, para el diagnóstico de Ajustes. */
   getEvents(): Promise<{ events: TriggerEvent[] }>;
   clearEvents(): Promise<void>;
@@ -143,6 +159,8 @@ export interface BackgroundOptions {
   /** Ventana nocturna en minutos desde medianoche. */
   nightStartMinutes: number;
   nightEndMinutes: number;
+  /** Sensores opcionales activos (fase 2); vacío si no hay ninguno. */
+  sensors?: SensorId[];
 }
 
 export async function startBackground(options: BackgroundOptions): Promise<boolean> {
@@ -347,6 +365,52 @@ export async function simulateGap(trigger: TriggerId, minutesAgo: number): Promi
   try {
     await SleepMonitor.simulateGap({ trigger, minutesAgo });
     return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Lee el registro bruto del servicio: pantalla, cargador y sensores, un evento
+ * por línea. Se usa para cruzarlo con los huecos y para exportarlo.
+ */
+export async function readRawEvents(): Promise<RawEvent[]> {
+  if (!isBackgroundAvailable()) return [];
+  try {
+    const { events } = await SleepMonitor.getRawEvents();
+    return cleanRawEvents(events);
+  } catch {
+    // Una versión anterior del plugin no conoce `getRawEvents`.
+    return [];
+  }
+}
+
+export async function clearRawEvents(): Promise<void> {
+  if (!isBackgroundAvailable()) return;
+  try {
+    await SleepMonitor.clearRawEvents();
+  } catch {
+    /* sin servicio no hay registro que limpiar */
+  }
+}
+
+/** Qué sensores tiene este móvil. Sin servicio nativo, ninguno. */
+export async function readSensorStatus(): Promise<SensorStatus> {
+  if (!isBackgroundAvailable()) return NO_SENSORS;
+  try {
+    const { sensors } = await SleepMonitor.sensorStatus();
+    return { ...NO_SENSORS, ...sensors };
+  } catch {
+    return NO_SENSORS;
+  }
+}
+
+/** Pide el permiso de actividad física. false si se deniega o no hace falta pedirlo. */
+export async function requestSensorPermission(): Promise<boolean> {
+  if (!isBackgroundAvailable()) return false;
+  try {
+    const { granted } = await SleepMonitor.requestSensorPermission();
+    return granted;
   } catch {
     return false;
   }

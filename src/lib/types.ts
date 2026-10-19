@@ -64,6 +64,25 @@ export type TriggerId =
   /** Sin ninguna otra señal, se propone la meta del horario como estimación. */
   | 'schedule';
 
+/**
+ * Sensores baratos que afinan la detección. A diferencia de los disparadores,
+ * no abren ni cierran huecos: aportan indicios (¿había actividad real antes de
+ * la quietud larga?, ¿se despertó alguien a esa hora?) que ajustan los bordes
+ * de la noche y alimentan la confianza. Todos son opcionales y nativos, y
+ * ninguno usa el micrófono.
+ */
+export type SensorId =
+  /** Pasos (o, sin permiso, movimiento significativo): actividad física real. */
+  | 'steps'
+  /** Luz ambiental: apagar la luz es la marca más clara de irse a dormir. */
+  | 'light'
+  /** Proximidad: móvil en el bolsillo o boca abajo, o cogido de nuevo. */
+  | 'proximity'
+  /** Próxima alarma del reloj: cuándo se espera despertar. */
+  | 'alarm'
+  /** Audio sonando con la pantalla apagada: aún no se ha dormido. */
+  | 'audio';
+
 export interface MonitorSettings {
   enabled: boolean;
   /** Inactividad mínima (minutos) para considerarla una sesión de sueño. */
@@ -89,6 +108,8 @@ export interface MonitorSettings {
   background: boolean;
   /** Qué disparadores están activos. Catálogo en `lib/triggers.ts`. */
   triggers: Record<TriggerId, boolean>;
+  /** Qué sensores opcionales están activos. Catálogo en `lib/sensors.ts`. */
+  sensors: Record<SensorId, boolean>;
 }
 
 /**
@@ -145,6 +166,15 @@ export interface SleepSession {
   confirmed: boolean;
   /** Señales que produjeron la detección, de más a menos directa. */
   triggers?: TriggerId[];
+  /**
+   * Los bordes del hueco tal como los midió el dispositivo, antes de cualquier
+   * corrección. Sirven para aprender cuánto se adelanta la señal a tu sueño
+   * real cuando editas la hora.
+   */
+  detectedStart?: number;
+  detectedEnd?: number;
+  /** Siesta aceptada por tener indicios propios; el resto de huecos de un día no se proponen. */
+  nap?: boolean;
   /** Valoración subjetiva del descanso, 1-5. */
   quality?: number;
   note?: string;

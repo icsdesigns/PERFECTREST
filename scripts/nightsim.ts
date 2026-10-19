@@ -640,13 +640,14 @@ assert(
   evaluateGaps(huecoImposible, MON).results.length === 0,
   evaluateGaps(huecoImposible, MON).results.map((r) => formatDuration(r.gapMs)),
 );
-// Pero la franja dudosa sigue proponiéndose, que es para lo que está: 14h
-// pasa del máximo creíble (13h) y no llega al techo, así que se propone con
-// confianza baja para que el usuario la corrija en vez de descartarla.
+// Pero la franja dudosa sigue proponiéndose, que es para lo que está: 12h30
+// pasa del máximo creíble que el usuario fija (aquí 12h) y no llega al techo
+// de 13h, así que se propone con confianza baja para que la corrija en vez de
+// descartarla.
 const largaPeroPosible: NativeGap[] = [
-  { start: t('2026-09-18T22:00:00'), end: t('2026-09-19T12:00:00'), startTrigger: 'screen', endTrigger: 'screen' },
+  { start: t('2026-09-18T22:00:00'), end: t('2026-09-19T10:30:00'), startTrigger: 'screen', endTrigger: 'screen' },
 ];
-const dudosa = evaluateGaps(largaPeroPosible, MON).results;
+const dudosa = evaluateGaps(largaPeroPosible, { ...MON, maxGapMinutes: 12 * 60 }).results;
 assert('una noche larga pero creíble sí se propone', dudosa.length === 1, dudosa.length);
 assert(
   'y se marca como dudosa para que se corrija',

@@ -1,12 +1,16 @@
 import { App } from '@capacitor/app';
 import { Capacitor } from '@capacitor/core';
 import { HOUR, MINUTE, formatDuration, inWindow, parseTime } from './time';
+import { minuteDiff, type SleepHabit } from './habit';
+import { gatherEvidence, type GapEvidence, type RawEvent } from './rawEvents';
+import { activeSensors } from './sensors';
 import { loadRaw, saveRaw } from './storage';
 import {
   clearGaps,
   isBackgroundAvailable,
   readGaps,
   readNativeEvents,
+  readRawEvents,
   type NativeGap,
 } from './backgroundMonitor';
 import { discardReason, logEvent, pushEvents } from './triggerLog';
@@ -56,6 +60,36 @@ export interface DetectionResult {
   session: SleepSession;
   /** Duración del hueco de inactividad detectado, en ms. */
   gapMs: number;
+  /** Puntuación 0-1 de lo noche que parece; de ella sale la confianza. */
+  score?: number;
+  /** Lo que dijeron los sensores de este hueco, si había alguno activo. */
+  evidence?: GapEvidence;
+}
+
+/**
+ * Lo que la evaluación sabe además del hueco mismo. Todo es opcional: sin
+ * contexto la detección se comporta como antes, con un hábito genérico.
+ */
+export interface DetectionContext {
+  /** A qué hora sueles acostarte y levantarte. */
+  habit?: SleepHabit | null;
+  /** Registro bruto del servicio, para cruzarlo con los huecos (sensores). */
+  events?: RawEvent[];
+  /** Noches ya registradas o a la espera de confirmar: ya tienen su noche principal. */
+  known?: Array<{ start: number; end: number }>;
+}
+
+/** Contexto de un solo hueco: lo que `evaluateGap` necesita de fuera. */
+export interface GapContext {
+  habit?: SleepHabit | null;
+  evidence?: GapEvidence | null;
+  /** Bordes tal como los midió el dispositivo, si se han recortado antes. */
+  detected?: { start: number; end: number };
+  /**
+   * No exigir que el hueco toque la ventana nocturna. Lo usa `evaluateGaps`,
+   * que lo juzga después de fusionar y dejando pasar las siestas con indicios.
+   */
+  lenient?: boolean;
 }
 
 /**
@@ -64,11 +98,23 @@ export interface DetectionResult {
  * Es distinto de `maxGapMinutes`, que marca lo dudoso: entre ese ajuste y este
  * techo la sesión se propone con confianza baja, para que el usuario la
  * corrija. Por encima ya no se propone nada, porque no hay nada que corregir.
- * Dieciocho horas superan cualquier episodio de sueño creíble, así que un
- * hueco mayor no habla del sueño sino de la medida: el móvil sin tocar todo un
- * día, o una señal de vuelta que se perdió y dejó el hueco abierto.
+ * Trece horas ya son más de lo que duerme casi nadie, así que un hueco mayor
+ * no habla del sueño sino de la medida: el móvil sin tocar todo un día, la
+ * tarde entera sin usarlo antes de acostarse, o una señal de vuelta que se
+ * perdió y dejó el hueco abierto. Con datos reales los huecos de entre 13 y 18
+ * horas eran siempre eso —una tarde despierto más una noche—, y proponerlos
+ * metía en el historial horas de sueño que nadie había dormido.
  */
-export const MAX_PLAUSIBLE_SLEEP_MS = 18 * HOUR;
+export const MAX_PLAUSIBLE_SLEEP_MS = 13 * HOUR;
+
+/** Una noche dura al menos esto; por debajo es una siesta larga o una tarde quieta. */
+export const SHORT_NIGHT_MS = 4.5 * HOUR;
+
+/** Hábito de reserva cuando no hay historial ni horario a mano. */
+const DEFAULT_HABIT: SleepHabit = { startMin: 23 * 60 + 30, endMin: 7 * 60 + 30, n: 0 };
+
+/** Un hueco corto sólo es una noche si empieza a esta distancia de tu hora de acostarte. */
+const SHORT_NIGHT_START_TOLERANCE_MIN = 210;
 
 /** Disparadores que dependen del servicio nativo. */
 export const NATIVE_TRIGGERS: TriggerId[] = TRIGGERS.filter((t) => t.native).map((t) => t.id);
@@ -77,6 +123,14 @@ export const NATIVE_TRIGGERS: TriggerId[] = TRIGGERS.filter((t) => t.native).map
 export function activeNativeTriggers(settings: MonitorSettings): TriggerId[] {
   return NATIVE_TRIGGERS.filter((id) => triggerEnabled(settings, id));
 }
+
+const minutesOfDay = (ts: number) => {
+  const d = new Date(ts);
+  return d.getHours() * 60 + d.getMinutes();
+};
+
+/** Por qué una evaluación terminó sin propuesta. */
+type Reject = 'implausible' | 'too-long';
 
 /**
  * Evalúa un hueco de inactividad y decide si merece proponerse como sueño.
@@ -87,9 +141,50 @@ export function evaluateGap(
   now: number,
   settings: MonitorSettings,
   triggers: TriggerId[] = ['appOpen'],
+  ctx: GapContext = {},
 ): DetectionResult | null {
+  const out = assessGap(lastActive, now, settings, triggers, ctx);
+  if (!('result' in out)) return null;
+  // Un hueco suelto se juzga entero; los que vienen de la cola nativa se
+  // juzgan después de fusionarlos (ver `evaluateGaps`).
+  const { start, end } = out.result.session;
+  return outOfPattern(start, end, ctx.habit ?? DEFAULT_HABIT) ? null : out.result;
+}
+
+/**
+ * Un hueco corto sólo es una noche si empieza cuando tú te acuestas. Los de la
+ * tarde o los de la mañana tras despertar (08:00-11:00) son el móvil quieto,
+ * no sueño: con datos reales eran casi todos los falsos positivos. Se mira
+ * sobre la noche ya fusionada, no sobre cada trozo: el rabo de una noche que
+ * un desbloqueo partió en dos también es corto y empieza de madrugada.
+ */
+function outOfPattern(start: number, end: number, habit: SleepHabit): boolean {
+  return (
+    end - start < SHORT_NIGHT_MS &&
+    Math.abs(minuteDiff(minutesOfDay(start), habit.startMin)) > SHORT_NIGHT_START_TOLERANCE_MIN
+  );
+}
+
+/** ¿Toca el tramo la ventana nocturna, o la atraviesa entera? */
+function fitsNight(start: number, end: number, settings: MonitorSettings): boolean {
+  const nightStart = parseTime(settings.nightStart);
+  const nightEnd = parseTime(settings.nightEnd);
+  return (
+    inWindow(minutesOfDay(start), nightStart, nightEnd) ||
+    inWindow(minutesOfDay(end), nightStart, nightEnd) ||
+    end - start >= 6 * HOUR
+  );
+}
+
+function assessGap(
+  lastActive: number,
+  now: number,
+  settings: MonitorSettings,
+  triggers: TriggerId[],
+  ctx: GapContext,
+): { result: DetectionResult } | { reject: Reject } {
   const gapMs = now - lastActive;
-  if (gapMs < settings.minGapMinutes * MINUTE) return null;
+  if (gapMs < settings.minGapMinutes * MINUTE) return { reject: 'implausible' };
 
   const startDate = new Date(lastActive);
   const endDate = new Date(now);
@@ -105,49 +200,152 @@ export function evaluateGap(
   const endsAtNight = inWindow(endMin, nightStart, nightEnd);
   const spansNight = gapMs >= 6 * HOUR;
 
-  if (!startsAtNight && !endsAtNight && !spansNight) return null;
+  if (!ctx.lenient && !startsAtNight && !endsAtNight && !spansNight) return { reject: 'implausible' };
   // Por encima del techo no hay noche dudosa que corregir, hay una medición
   // que falló: el móvil pasó el día en un cajón, o una señal de vuelta se
   // perdió y el hueco siguió abierto. `maxGapMinutes` no basta para pararlo
   // —sólo baja la confianza— y con «guardar sin preguntar» activo eso mete
-  // 21 horas de «sueño» en el historial sin que nadie las vea. Hay que
+  // horas de «sueño» en el historial sin que nadie las vea. Hay que
   // descartarlo aquí: ninguna corrección posterior salva un dato así.
-  if (gapMs > MAX_PLAUSIBLE_SLEEP_MS) return null;
+  if (gapMs > MAX_PLAUSIBLE_SLEEP_MS) return { reject: 'too-long' };
+
+  const habit = ctx.habit ?? DEFAULT_HABIT;
+
+  const { score, confidence } = scoreGap({
+    gapMs,
+    startMin,
+    endMin,
+    startsAtNight,
+    endsAtNight,
+    settings,
+    triggers,
+    habit,
+    evidence: ctx.evidence ?? null,
+  });
+
+  // Los sensores pueden mover los bordes: el último momento de actividad real
+  // es mejor inicio que el último uso del móvil, y el primer despertar real
+  // mejor final que el primer desbloqueo. Sólo si queda una noche creíble.
+  let start = lastActive;
+  let end = now;
+  const ev = ctx.evidence;
+  if (ev) {
+    if (ev.activityAt !== null && ev.activityAt > start) start = ev.activityAt;
+    if (ev.wakeAt !== null && ev.wakeAt < end) end = ev.wakeAt;
+    if (end - start < settings.minGapMinutes * MINUTE) {
+      start = lastActive;
+      end = now;
+    }
+  }
 
   return {
-    gapMs,
-    session: {
-      id: `auto-${lastActive}`,
-      start: lastActive,
-      end: now,
-      source: 'auto',
-      confidence: scoreConfidence(gapMs, startsAtNight, endsAtNight, settings, triggers),
-      confirmed: false,
-      triggers: sortTriggers(triggers),
+    result: {
+      gapMs,
+      score,
+      evidence: ev ?? undefined,
+      session: {
+        id: `auto-${lastActive}`,
+        start,
+        end,
+        source: 'auto',
+        confidence,
+        confirmed: false,
+        triggers: sortTriggers(triggers),
+        detectedStart: ctx.detected?.start ?? lastActive,
+        detectedEnd: ctx.detected?.end ?? now,
+      },
     },
   };
 }
 
-function scoreConfidence(
-  gapMs: number,
-  startsAtNight: boolean,
-  endsAtNight: boolean,
-  settings: MonitorSettings,
-  triggers: TriggerId[],
-): Confidence {
+/** Escalón: el valor del primer tramo cuyo límite no se supera; `rest` si ninguno. */
+function tier(value: number, steps: Array<[number, number]>, rest: number): number {
+  for (const [limit, v] of steps) if (value <= limit) return v;
+  return rest;
+}
+
+interface ScoreInput {
+  gapMs: number;
+  startMin: number;
+  endMin: number;
+  startsAtNight: boolean;
+  endsAtNight: boolean;
+  settings: MonitorSettings;
+  triggers: TriggerId[];
+  habit: SleepHabit;
+  evidence: GapEvidence | null;
+}
+
+/**
+ * Puntúa lo noche que parece un hueco combinando varias evidencias, cada una
+ * con su peso, en vez de mirar sólo la duración y la hora:
+ *
+ *   duración      cuánto se parece a una noche (6-10 h lo más; 4,5 y 12 aún caben)
+ *   hora habitual a qué distancia de tu hora de acostarte y de levantarte cae
+ *   disparadores  dos señales independientes valen mucho más que una
+ *   quietud       (sensores) sin pasos ni audio entre medias
+ *   oscuridad     (sensores) luz apagada durante el sueño
+ *   alarma        (sensores) la alarma programada cae junto al final
+ *
+ * Las evidencias que faltan no puntúan ni a favor ni en contra: se promedia
+ * sólo sobre las que hay, para que quien no active sensores no salga
+ * penalizado por ellos.
+ */
+function scoreGap(input: ScoreInput): { score: number; confidence: Confidence } {
+  const { gapMs, settings, triggers, habit, evidence } = input;
   const hours = gapMs / HOUR;
   const tooLong = gapMs > settings.maxGapMinutes * MINUTE;
 
-  // Un hueco nocturno de duración plausible por ambos extremos es lo más
-  // fiable que este método puede ofrecer.
-  if (startsAtNight && endsAtNight && hours >= 4 && hours <= 11) return 'high';
-  if (tooLong || hours < 3.5) return 'low';
-  // Dos señales independientes sobre el mismo hueco valen más que una: si el
-  // cargador y la pantalla coinciden, el margen de error se reduce mucho.
-  if (startsAtNight || endsAtNight) {
-    return new Set(triggers).size >= 2 ? 'high' : 'medium';
+  const parts: Array<[weight: number, value: number]> = [];
+
+  // Duración.
+  parts.push([
+    2,
+    hours >= 6 && hours <= 10
+      ? 1
+      : hours >= 5 && hours <= 11
+        ? 0.8
+        : hours >= SHORT_NIGHT_MS / HOUR && hours <= 12
+          ? 0.5
+          : hours >= 3.5 && hours <= 13
+            ? 0.2
+            : 0,
+  ]);
+
+  // Hora habitual: con un hábito aprendido pesa el doble que con el del horario.
+  const learned = habit.n >= 4 ? 1 : 0.5;
+  const startDiff = Math.abs(minuteDiff(input.startMin, habit.startMin));
+  const endDiff = Math.abs(minuteDiff(input.endMin, habit.endMin));
+  parts.push([2 * learned, tier(startDiff, [[60, 1], [120, 0.8], [180, 0.55], [270, 0.3]], 0.05)]);
+  parts.push([1 * learned, tier(endDiff, [[60, 1], [150, 0.65], [240, 0.3]], 0.05)]);
+  // La ventana nocturna configurada sigue contando, poco: es la forma de que
+  // el ajuste del usuario siga teniendo efecto.
+  parts.push([
+    0.5,
+    (input.startsAtNight ? 0.5 : 0) + (input.endsAtNight ? 0.5 : 0),
+  ]);
+
+  // Acuerdo entre disparadores: sólo cuentan los que miden el dispositivo.
+  const independent = new Set(triggers.filter((id) => id !== 'appOpen' && id !== 'schedule'));
+  parts.push([1.5, independent.size >= 3 ? 1 : independent.size === 2 ? 0.9 : independent.size === 1 ? 0.4 : 0.2]);
+
+  if (evidence) {
+    if (evidence.moves !== null) parts.push([1, evidence.moves === 0 ? 1 : evidence.moves === 1 ? 0.6 : 0.2]);
+    if (evidence.dark !== null) parts.push([1.5, evidence.dark]);
+    if (evidence.alarmMatch !== null) parts.push([evidence.alarmMatch ? 1.5 : 0.5, evidence.alarmMatch ? 1 : 0.4]);
   }
-  return 'low';
+
+  const totalWeight = parts.reduce((sum, [w]) => sum + w, 0);
+  const score = parts.reduce((sum, [w, v]) => sum + w * v, 0) / totalWeight;
+
+  let confidence: Confidence = score >= 0.7 ? 'high' : score >= 0.45 ? 'medium' : 'low';
+  // Un hueco por encima de lo dudoso, o demasiado corto para una noche, nunca
+  // sube de baja por mucho que otras evidencias coincidan.
+  if (tooLong || hours < 3.5) confidence = 'low';
+  // Un inicio a más de cuatro horas y media de tu hora de acostarte es casi
+  // seguro la tarde despierto: se propone, pero nunca como segura.
+  else if (startDiff > 270 && confidence === 'high') confidence = 'medium';
+  return { score, confidence };
 }
 
 /**
@@ -157,7 +355,11 @@ function scoreConfidence(
  * mismo disparador puede además partir la noche en trozos: Android sale de
  * Doze en cada ventana de mantenimiento, y una pantalla que se enciende sola
  * cierra y reabre el hueco. Por eso el agrupado no exige solape estricto, sino
- * que salva también las interrupciones cortas (`BRIDGE_MS`).
+ * que salva también las interrupciones cortas (`BRIDGE_MS`, lo mismo que
+ * aguanta el servicio antes de dar por cerrado un hueco). Eran 45 minutos,
+ * pero con el final de la noche en el primer uso sostenido, 45 minutos de
+ * margen se tragaban el rato de después de levantarse y la mañana sin tocar el
+ * móvil acababa pegada a la noche, como si se hubiera dormido hasta las 10.
  *
  * De cada grupo se toma el borde de la **señal más directa** que contenga.
  * Antes se tomaba la intersección de todas, y eso resultaba ser justo lo
@@ -168,7 +370,7 @@ function scoreConfidence(
  * y sobre Doze, que acotan por fuera o llegan a trozos, y los trozos de la
  * señal ganadora se unen en un solo tramo.
  */
-const BRIDGE_MS = 45 * MINUTE;
+const BRIDGE_MS = 15 * MINUTE;
 
 /** Lo directa que es la señal más directa de una detección. */
 function directnessOf(triggers: TriggerId[] | undefined): number {
@@ -179,6 +381,7 @@ function directnessOf(triggers: TriggerId[] | undefined): number {
 export function mergeDetections(
   results: DetectionResult[],
   settings: MonitorSettings,
+  habit?: SleepHabit | null,
 ): DetectionResult[] {
   const sorted = [...results].sort((a, b) => a.session.start - b.session.start);
   const clusters: DetectionResult[][] = [];
@@ -195,10 +398,14 @@ export function mergeDetections(
     }
   }
 
-  return clusters.map((cluster) => fuseCluster(cluster, settings));
+  return clusters.map((cluster) => fuseCluster(cluster, settings, habit));
 }
 
-function fuseCluster(cluster: DetectionResult[], settings: MonitorSettings): DetectionResult {
+function fuseCluster(
+  cluster: DetectionResult[],
+  settings: MonitorSettings,
+  habit?: SleepHabit | null,
+): DetectionResult {
   if (cluster.length === 1) return cluster[0];
 
   const best = Math.max(...cluster.map((r) => directnessOf(r.session.triggers)));
@@ -206,11 +413,20 @@ function fuseCluster(cluster: DetectionResult[], settings: MonitorSettings): Det
   const start = Math.min(...lead.map((r) => r.session.start));
   const end = Math.max(...lead.map((r) => r.session.end));
   const triggers = sortTriggers(cluster.flatMap((r) => r.session.triggers ?? []));
+  const detectedStart = Math.min(...lead.map((r) => r.session.detectedStart ?? r.session.start));
+  const detectedEnd = Math.max(...lead.map((r) => r.session.detectedEnd ?? r.session.end));
 
   // Se reevalúa desde cero para que la confianza mire el tramo definitivo y
-  // los disparadores que lo respaldan, no los de un trozo suelto.
-  const fused = evaluateGap(start, end, settings, triggers);
-  if (fused) return fused;
+  // los disparadores que lo respaldan, no los de un trozo suelto. Los bordes
+  // del líder ya vienen ajustados por los sensores: se reevalúa sin volver a
+  // aplicarlos, pero conservando su evidencia para la confianza.
+  const evidence = lead.find((r) => r.evidence)?.evidence ?? null;
+  const fused = assessGap(start, end, settings, triggers, {
+    habit,
+    evidence: evidence && { ...evidence, activityAt: null, wakeAt: null },
+    detected: { start: detectedStart, end: detectedEnd },
+  });
+  if ('result' in fused) return fused.result;
 
   // Si el tramo resultante ya no fuera plausible se conserva el trozo más
   // largo, que es la mejor aproximación disponible, en vez de perder la noche.
@@ -220,22 +436,62 @@ function fuseCluster(cluster: DetectionResult[], settings: MonitorSettings): Det
   return { ...longest, session: { ...longest.session, triggers } };
 }
 
+/** Opciones con las que `refineEdges` afina los bordes más allá de la latencia fija. */
+export interface RefineOptions {
+  /** Latencia personal aprendida de tus noches corregidas (minutos). */
+  learnedLatencyMinutes?: number | null;
+  /**
+   * Tu hábito, si ya es de fiar. El inicio medido se adelanta tanto a dormirse
+   * (se suelta el móvil, y se sigue despierto una hora o dos) que, cuando cae
+   * mucho antes de tu hora de acostarte, esa hora es mejor estimación.
+   */
+  habit?: SleepHabit | null;
+}
+
+/** Cuánto antes de la hora habitual puede caer el inicio sin que se corrija. */
+const HABIT_START_SLACK_MS = 20 * MINUTE;
+/** A cuánto tiempo hacia atrás del hábito se busca si el inicio medido es «demasiado pronto». */
+const HABIT_REACH_MS = 9 * HOUR;
+
 /**
  * Ajusta los bordes de la sesión: la inactividad empieza un poco antes de
  * dormirse de verdad (primero se suelta el móvil, luego se concilia el sueño)
  * y termina un poco después de despertar (nadie coge el móvil al instante).
  * Corregir ambos extremos acerca la estimación al sueño real en lugar de
  * medir simplemente el tiempo sin pantalla.
+ *
+ * Con un hábito aprendido, el inicio nunca se queda mucho antes de tu hora de
+ * acostarte: quien suelta el móvil a las 21:30 y se duerme a las 00:30 no
+ * durmió tres horas más. Con la latencia personal aprendida, el desfase fijo
+ * de ajustes se sustituye por el tuyo.
  */
-export function refineEdges(session: SleepSession, latencyMinutes: number): SleepSession {
+export function refineEdges(
+  session: SleepSession,
+  latencyMinutes: number,
+  options: RefineOptions = {},
+): SleepSession {
   // Una propuesta calcada del horario ya está expresada en tiempo de sueño:
   // corregirle los bordes descontaría la latencia dos veces.
   if (session.triggers?.length === 1 && session.triggers[0] === 'schedule') return session;
 
-  const startBias = latencyMinutes * MINUTE; // tarda en dormirse
+  const learned = options.learnedLatencyMinutes;
+  const startBias = (learned != null ? learned : latencyMinutes) * MINUTE; // tarda en dormirse
   const endBias = 5 * MINUTE; // tarda en coger el móvil
-  const start = session.start + startBias;
+  let start = session.start + startBias;
   const end = session.end - endBias;
+
+  const habit = options.habit;
+  if (habit && habit.n >= 4) {
+    const early = minuteDiff(habit.startMin - 0, minutesOfDay(start));
+    // `early` > 0: el hábito cae después del inicio estimado. Si es por menos
+    // de la holgura el inicio vale; si es por mucho, se adelanta hasta el hábito.
+    if (early * MINUTE > HABIT_START_SLACK_MS && early * MINUTE <= HABIT_REACH_MS) {
+      const moved = start + early * MINUTE - HABIT_START_SLACK_MS;
+      // Si lo que queda ya no parece una noche, el hábito se equivoca de día.
+      if (end - moved >= 3 * HOUR) start = moved;
+    }
+  }
+
   if (end - start < 60 * MINUTE) return session;
   return { ...session, start, end };
 }
@@ -243,25 +499,85 @@ export function refineEdges(session: SleepSession, latencyMinutes: number): Slee
 /** Por qué un hueco del servicio no llegó a proponerse. */
 export interface RejectedGap {
   gap: NativeGap;
-  reason: 'trigger-off' | 'implausible';
+  reason: 'trigger-off' | 'implausible' | 'too-long' | 'out-of-pattern' | 'secondary';
   /** El disparador culpable: el apagado, o el que cerró el hueco. */
   trigger: TriggerId | null;
+}
+
+/** Despertar breve (desbloqueo corto) que sigue contando como parte del mismo sueño. */
+const LATE_WAKE_PULL_MS = 75 * MINUTE;
+/** Una noche no cabe en menos de esto: un recorte nunca deja menos. */
+const MIN_TAIL_MS = 4 * HOUR;
+/** Cuánto antes de tu hora de acostarte puede empezar un hueco sin sospecha. */
+const EARLY_START_SUSPECT_MIN = 90;
+/** Margen alrededor de tu hora de acostarte donde un micro-despertar es «me fui a dormir». */
+const BEDTIME_WAKE_REACH_MIN = 150;
+
+/**
+ * Recorta los bordes de un hueco con lo que dicen sus micro-despertares
+ * (desbloqueos cortos que el servicio no tomó por el final de la noche).
+ *
+ * Por el principio: el último uso del móvil antes de dormir suele ser una
+ * mirada breve a la hora o a la alarma, no el momento en que se soltó el
+ * móvil para el resto de la tarde. Si el hueco arranca mucho antes de tu hora
+ * de acostarte y hay un micro-despertar alrededor de ella con noche suficiente
+ * por detrás, ahí empieza el sueño. Lo mismo, a la fuerza, con los huecos que
+ * pasan del techo: el que deja un tramo creíble más cerca de tu hora.
+ *
+ * Por el final: un desbloqueo de segundos en los últimos tres cuartos de hora
+ * antes del uso sostenido es casi siempre alguien que ya estaba despierto —
+ * mirar la hora, parar la alarma — y se levantó sin coger el móvil. Despertar
+ * es lo primero de esa cadena.
+ */
+function trimGap(
+  gap: NativeGap,
+  habit: SleepHabit,
+): { start: number; end: number } {
+  let { start, end } = gap;
+  const wakes = (gap.wakes ?? []).filter((w) => w > start && w < end).sort((a, b) => a - b);
+  if (!wakes.length) return { start, end };
+
+  // Final: se retrocede por la cadena de micro-despertares pegados al uso.
+  let pulled = end;
+  for (let i = wakes.length - 1; i >= 0; i--) {
+    if (pulled - wakes[i] <= LATE_WAKE_PULL_MS) pulled = wakes[i];
+    else break;
+  }
+  if (pulled - start >= MIN_TAIL_MS) end = pulled;
+
+  // Inicio.
+  const towardsHabit = (ts: number) => Math.abs(minuteDiff(minutesOfDay(ts), habit.startMin));
+  const candidates = wakes.filter((w) => end - w >= MIN_TAIL_MS && end - w <= MAX_PLAUSIBLE_SLEEP_MS);
+  if (end - start > MAX_PLAUSIBLE_SLEEP_MS) {
+    // Obligado: el hueco entero no cabe en una noche.
+    if (candidates.length) {
+      start = candidates.reduce((best, w) => (towardsHabit(w) <= towardsHabit(best) ? w : best));
+    }
+  } else if (minuteDiff(minutesOfDay(start), habit.startMin) < -EARLY_START_SUSPECT_MIN) {
+    const near = candidates.filter((w) => towardsHabit(w) <= BEDTIME_WAKE_REACH_MIN);
+    if (near.length) start = near[near.length - 1];
+  }
+  return { start, end };
 }
 
 /**
  * Convierte los huecos del servicio en sesiones candidatas.
  *
  * Es pura a propósito, separada de la lectura de la cola nativa: es la parte
- * con lógica de verdad —filtrado por disparador, plausibilidad y fusión— y así
- * la simulación de una noche completa puede recorrerla tal cual, en vez de
- * comprobar una maqueta parecida.
+ * con lógica de verdad —filtrado por disparador, plausibilidad, recorte,
+ * fusión y elección de la noche principal— y así la simulación de una noche
+ * completa puede recorrerla tal cual, en vez de comprobar una maqueta parecida.
  */
 export function evaluateGaps(
   gaps: NativeGap[],
   settings: MonitorSettings,
+  ctx: DetectionContext = {},
 ): { results: DetectionResult[]; rejected: RejectedGap[] } {
   const raw: DetectionResult[] = [];
   const rejected: RejectedGap[] = [];
+  const habit = ctx.habit ?? DEFAULT_HABIT;
+  const sensors = activeSensors(settings);
+  const owner = new Map<string, NativeGap>();
 
   for (const gap of gaps) {
     // Un hueco puede haberse registrado con un disparador que el usuario ha
@@ -273,13 +589,143 @@ export function evaluateGaps(
       continue;
     }
 
-    const result = evaluateGap(gap.start, gap.end, settings, triggers);
-    if (result) raw.push(result);
-    else rejected.push({ gap, reason: 'implausible', trigger: gap.endTrigger });
+    const { start, end } = trimGap(gap, habit);
+    // Los sensores miran el tramo ya recortado: si no, la tarde despierta
+    // entraría en las cuentas de quietud y oscuridad de la noche.
+    const evidence = ctx.events?.length ? gatherEvidence(ctx.events, start, end, sensors) : null;
+    const out = assessGap(start, end, settings, triggers, {
+      habit,
+      evidence: evidence && evidence.sensors.length ? evidence : null,
+      detected: { start: gap.start, end: gap.end },
+      lenient: true,
+    });
+    if ('result' in out) {
+      raw.push(out.result);
+      owner.set(out.result.session.id, gap);
+    } else {
+      rejected.push({ gap, reason: out.reject, trigger: gap.endTrigger });
+    }
   }
 
-  return { results: mergeDetections(raw, settings), rejected };
+  // La ventana nocturna y la hora de acostarse se juzgan sobre la noche ya
+  // fusionada, no sobre cada trozo: el rabo de una noche partida por un
+  // desbloqueo también es corto y empieza de madrugada. Lo que no encaja sólo
+  // sobrevive si trae indicios propios de siesta.
+  const fused = mergeDetections(raw, settings, habit);
+  const merged: DetectionResult[] = [];
+  for (const r of fused) {
+    const { start, end } = r.session;
+    const reason = !fitsNight(start, end, settings)
+      ? 'implausible'
+      : outOfPattern(start, end, habit)
+        ? 'out-of-pattern'
+        : null;
+    if (!reason) merged.push(r);
+    else if (napEvidence(r)) merged.push(asNap(r));
+    else {
+      const gap = owner.get(r.session.id) ?? gapOf(r);
+      rejected.push({ gap, reason, trigger: gap.endTrigger });
+    }
+  }
+  const { kept, dropped } = pickMainNights(merged, ctx.known ?? []);
+  for (const r of dropped) {
+    const gap = owner.get(r.session.id) ?? gapOf(r);
+    rejected.push({ gap, reason: 'secondary', trigger: gap.endTrigger });
+  }
+  return { results: kept, rejected };
 }
+
+/** El hueco crudo que dio lugar a una detección, para anotar su descarte. */
+function gapOf(r: DetectionResult): NativeGap {
+  const trigger = r.session.triggers?.[0] ?? 'screen';
+  return {
+    start: r.session.detectedStart ?? r.session.start,
+    end: r.session.detectedEnd ?? r.session.end,
+    startTrigger: trigger,
+    endTrigger: trigger,
+  };
+}
+
+/** Noche a la que pertenece un tramo: el día que empieza al mediodía anterior a su punto medio. */
+function nightKey(start: number, end: number): string {
+  const d = new Date((start + end) / 2 - 12 * HOUR);
+  return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+}
+
+/**
+ * Una noche principal por día.
+ *
+ * Con las señales del móvil, un mismo día deja varios huecos largos: la noche,
+ * pero también la tarde sin tocar el móvil y la mañana tras levantarse. De
+ * ellos sólo uno puede ser la noche; los demás sólo se proponen como siesta si
+ * traen indicios propios (otra señal independiente —cargador, «no molestar»—
+ * o, con sensores, oscuridad y quietud totales). Sin indicios no son sueño, y
+ * proponerlos «con confianza baja» sólo llenaba la cola de cosas que corregir.
+ *
+ * La noche principal es la de mayor puntuación (a igualdad, la más larga), y
+ * las noches ya registradas o pendientes cuentan como principales.
+ */
+function pickMainNights(
+  results: DetectionResult[],
+  known: Array<{ start: number; end: number }>,
+): { kept: DetectionResult[]; dropped: DetectionResult[] } {
+  const groups = new Map<string, DetectionResult[]>();
+  for (const r of results) {
+    const key = nightKey(r.session.start, r.session.end);
+    groups.set(key, [...(groups.get(key) ?? []), r]);
+  }
+  const knownKeys = new Set(known.map((k) => nightKey(k.start, k.end)));
+  const rank = (r: DetectionResult) => (r.score ?? 0.5) + Math.min(r.gapMs, 10 * HOUR) / (40 * HOUR);
+
+  const kept: DetectionResult[] = [];
+  const dropped: DetectionResult[] = [];
+  for (const [key, group] of groups) {
+    const ordered = [...group].filter((r) => !r.session.nap).concat(group.filter((r) => r.session.nap)).sort((a, b) => rank(b) - rank(a));
+    const hasMain = knownKeys.has(key);
+    ordered.forEach((r, i) => {
+      if (r.session.nap) kept.push(r); // ya viene con sus indicios
+      else if (i === 0 && !hasMain) kept.push(r);
+      else if (napEvidence(r)) kept.push(asNap(r));
+      else dropped.push(r);
+    });
+  }
+  return { kept: kept.sort((a, b) => a.session.start - b.session.start), dropped };
+}
+
+/**
+ * ¿Trae el hueco indicios propios de ser sueño, más allá de que el móvil
+ * estuviera quieto? Dos señales independientes que lo midan (pantalla más
+ * cargador o «no molestar»; Doze es sólo la pantalla vista desde otro lado), o
+ * con sensores, oscuridad y quietud totales.
+ */
+function napEvidence(r: DetectionResult): boolean {
+  const triggers = new Set(r.session.triggers ?? []);
+  const independent = (['screen', 'charger', 'dnd'] as TriggerId[]).filter((id) => triggers.has(id));
+  if (independent.length >= 2) return true;
+  const ev = r.evidence;
+  return !!ev && ev.dark !== null && ev.dark >= 0.8 && (ev.moves ?? 0) === 0 && ev.sensors.length > 0;
+}
+
+/** La misma detección, marcada como siesta y sin pasar de confianza media. */
+function asNap(r: DetectionResult): DetectionResult {
+  return {
+    ...r,
+    session: {
+      ...r.session,
+      nap: true,
+      confidence: r.session.confidence === 'high' ? 'medium' : r.session.confidence,
+    },
+  };
+}
+
+/** Lo que se escribe en el registro por cada motivo de descarte. */
+const REJECT_TEXT: Record<RejectedGap['reason'], string> = {
+  'trigger-off': 'el disparador está apagado',
+  implausible: 'fuera de la ventana nocturna o demasiado corto',
+  'too-long': 'más largo que una noche posible: probablemente una tarde despierto más la noche',
+  'out-of-pattern': 'hueco corto fuera de tu hora de acostarte: móvil quieto, no sueño',
+  secondary: 'ya hay una noche principal ese día y este hueco no trae indicios de siesta',
+};
 
 /**
  * Procesa los huecos que el servicio nativo registró con la app cerrada.
@@ -290,14 +736,21 @@ export function evaluateGaps(
  * el mismo filtro de plausibilidad, y sólo se descartan de la cola nativa
  * cuando ya se han entregado.
  */
-export async function collectNativeGaps(settings: MonitorSettings): Promise<DetectionResult[]> {
+export async function collectNativeGaps(
+  settings: MonitorSettings,
+  ctx: DetectionContext = {},
+): Promise<DetectionResult[]> {
   if (!isBackgroundAvailable()) return [];
 
   const { gaps } = await readGaps();
   if (!gaps.length) return [];
 
+  // El registro bruto sólo hace falta si hay sensores que cruzar con el hueco.
+  const events =
+    ctx.events ?? (activeSensors(settings).length ? await readRawEvents() : undefined);
+
   const processedUntil = gaps.reduce((max, gap) => Math.max(max, gap.end), 0);
-  const { results, rejected } = evaluateGaps(gaps, settings);
+  const { results, rejected } = evaluateGaps(gaps, settings, { ...ctx, events });
 
   for (const item of rejected) {
     if (item.reason === 'trigger-off' && item.trigger) {
@@ -315,10 +768,7 @@ export async function collectNativeGaps(settings: MonitorSettings): Promise<Dete
       await logEvent(
         item.trigger,
         'discard',
-        discardReason(
-          item.gap.end - item.gap.start,
-          'fuera de la ventana nocturna o demasiado corto',
-        ),
+        discardReason(item.gap.end - item.gap.start, REJECT_TEXT[item.reason]),
         item.gap.end,
       );
     }
@@ -448,6 +898,11 @@ export interface MonitorCallbacks {
    * módulo no tiene (las metas y las sesiones ya registradas).
    */
   onQuiet?: (now: number) => void;
+  /**
+   * Contexto de la evaluación: tu hábito y las noches que ya hay. Lo tiene el
+   * store, que es quien conoce las sesiones; este módulo no.
+   */
+  getContext?: () => DetectionContext;
 }
 
 /**
@@ -461,7 +916,7 @@ export function startMonitor(
 ): MonitorHandle {
   let stopped = false;
   const listeners: Array<() => void> = [];
-  const { onDetect, onBeat, onDeviceUse, onQuiet } = callbacks;
+  const { onDetect, onBeat, onDeviceUse, onQuiet, getContext } = callbacks;
 
   const check = async () => {
     if (stopped) return;
@@ -479,7 +934,7 @@ export function startMonitor(
       // Lo registrado en segundo plano tiene prioridad: es una medida directa
       // del uso del dispositivo, no una deducción a partir de la app.
       const native = activeNativeTriggers(settings).length
-        ? await collectNativeGaps(settings)
+        ? await collectNativeGaps(settings, getContext?.() ?? {})
         : [];
       for (const result of native) {
         if (!stopped) {
@@ -492,7 +947,9 @@ export function startMonitor(
       // El hueco entre aperturas de la app sólo se usa cuando el servicio
       // nativo no aportó nada, para no proponer la misma noche dos veces.
       if (!native.length && last !== null && triggerEnabled(settings, 'appOpen')) {
-        const result = evaluateGap(last, now, settings, ['appOpen']);
+        const result = evaluateGap(last, now, settings, ['appOpen'], {
+          habit: getContext?.().habit,
+        });
         if (result) {
           onDetect(result);
           await logDetection(result);

@@ -167,12 +167,16 @@ assert('hueco corto de 2h se descarta',
 assert('siesta de 4h por la tarde se descarta',
   evaluateGap(at('2026-08-19T14:00:00'), at('2026-08-19T18:00:00'), mon) === null);
 
+// Pasadas 13h no es una noche sino una tarde despierto más la noche (o un móvil
+// olvidado): no hay nada que corregir y se descarta.
 const marathon = evaluateGap(at('2026-08-18T22:00:00'), at('2026-08-19T16:00:00'), mon);
-assert('hueco de 18h se detecta pero es dudoso',
-  marathon !== null && marathon.session.confidence === 'low', marathon?.session.confidence);
+assert('hueco de 18h se descarta por pasar del techo', marathon === null, marathon?.session.confidence);
+const doubtful = evaluateGap(at('2026-08-18T22:00:00'), at('2026-08-19T10:30:00'), mon);
+assert('hueco de 12h30 se detecta pero es dudoso',
+  doubtful !== null && doubtful.session.confidence === 'low', doubtful?.session.confidence);
 
 const dawn = evaluateGap(at('2026-08-19T02:30:00'), at('2026-08-19T09:00:00'), mon);
-assert('trasnochar sigue siendo confianza alta', dawn?.session.confidence === 'high', dawn?.session.confidence);
+assert('trasnochar no es dudoso', dawn !== null && dawn.session.confidence !== 'low', dawn?.session.confidence);
 
 const refined = refineEdges(nightGap!.session, 15);
 assert('refineEdges retrasa el inicio 15 min', refined.start === nightGap!.session.start + 15 * 60000);

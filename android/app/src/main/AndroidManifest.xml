@@ -91,6 +91,20 @@
          pierde entera. La app sólo abre el diálogo; concederla es del usuario. -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
+    <!-- Sensores opcionales de la detección (fase 2). «Actividad física» sólo
+         lo pide el contador de pasos, y sólo si el usuario activa ese sensor;
+         sin él se usa el movimiento significativo, que no necesita permiso.
+         La luz, la proximidad, la próxima alarma y el audio sonando no piden
+         ninguno, y ninguno usa el micrófono. -->
+    <uses-permission android:name="android.permission.ACTIVITY_RECOGNITION" />
+
+    <!-- Ningún sensor es obligatorio: sin ellos la app sigue detectando con el
+         uso del móvil. Declararlos opcionales evita que Play oculte la app en
+         los móviles que no los traen. -->
+    <uses-feature android:name="android.hardware.sensor.stepcounter" android:required="false" />
+    <uses-feature android:name="android.hardware.sensor.light" android:required="false" />
+    <uses-feature android:name="android.hardware.sensor.proximity" android:required="false" />
+
     <!-- Autoactualización desde las releases de GitHub. Sólo abre el instalador
          del sistema: la instalación silenciosa exige ser device owner. -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />

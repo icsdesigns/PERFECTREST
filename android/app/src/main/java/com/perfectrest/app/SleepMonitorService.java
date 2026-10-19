@@ -29,7 +29,9 @@ import org.json.JSONException;
 import org.json.JSONObject;
 
 import java.util.Calendar;
+import java.util.HashSet;
 import java.util.Locale;
+import java.util.Set;
 
 /**
  * Monitorización del uso del dispositivo en segundo plano.
@@ -79,6 +81,18 @@ import java.util.Locale;
  * Sin eso, la detección se apagaba silenciosamente y sólo volvía a haber datos
  * al abrir la app, que es justo lo que se quería evitar.
  *
+ * El final de la noche es el primer **uso sostenido**, no el primer desbloqueo.
+ * Mirar la hora a las seis de la mañana, o parar una alarma, son desbloqueos de
+ * segundos tras los cuales se sigue durmiendo, y tomarlos por el final partía
+ * la noche y inflaba la mañana. Un desbloqueo sólo cierra el hueco si el uso
+ * se sostiene (pantalla en uso {@link #SUSTAINED_USE_MS} o varios desbloqueos
+ * seguidos); los demás quedan anotados como micro-despertares dentro del hueco,
+ * y la capa web decide qué hacer con ellos. Ver {@link #screenInUse(long)}.
+ *
+ * Junto a los disparadores, un {@link SensorWatcher} opcional registra pasos,
+ * luz, proximidad, alarma y audio en el registro bruto ({@link RawEventLog}),
+ * que la capa web cruza con cada hueco para afinar los bordes de la noche.
+ *
  * Todo lo que puede fallar por un permiso que falta —entrar en primer plano,
  * programar la alarma exacta, publicar una notificación— queda anotado en
  * {@link #KEY_LAST_ERROR} en vez de morir en silencio: es lo único que
@@ -110,6 +124,22 @@ public class SleepMonitorService extends Service {
     public static final String KEY_LAST_ERROR = "lastError";
     /** Instante del último hueco encolado, para el diagnóstico de Ajustes. */
     public static final String KEY_LAST_GAP_AT = "lastGapAt";
+
+    /** Sensores opcionales activos, separados por comas: "steps,light". */
+    public static final String KEY_SENSORS = "sensors";
+
+    /**
+     * Estado del uso de pantalla con un hueco largo abierto: el primer
+     * desbloqueo del grupo (el candidato a final), la última vez que se apagó la
+     * pantalla, cuánto se ha usado en total, cuántos desbloqueos, desde cuándo
+     * está en uso ahora (0 si apagada) y los micro-despertares ya descartados.
+     */
+    public static final String KEY_WAKE_FIRST = "wakeFirstAt";
+    public static final String KEY_WAKE_LAST_OFF = "wakeLastOffAt";
+    public static final String KEY_WAKE_USE = "wakeUseMs";
+    public static final String KEY_WAKE_UNLOCKS = "wakeUnlocks";
+    public static final String KEY_WAKE_ON = "wakeOnSince";
+    public static final String KEY_WAKES = "wakes";
 
     /** Aviso con la estimación del sueño al despertar (Módulo 3). */
     public static final String KEY_SUMMARY = "wakeSummary";
@@ -194,6 +224,18 @@ public class SleepMonitorService extends Service {
     private static final int MAX_GAPS = 60;
     /** Tope del registro de eventos. Cubre varios días sin crecer sin fin. */
     private static final int MAX_EVENTS = 200;
+    /**
+     * Uso de pantalla a partir del cual un desbloqueo deja de ser un
+     * micro-despertar y pasa a ser el final de la noche. Mirar la hora o parar
+     * una alarma son segundos; leer o contestar mensajes son minutos.
+     */
+    private static final long SUSTAINED_USE_MS = 5 * 60_000L;
+    /** Desbloqueos seguidos que, aun siendo breves, también cuentan como despertar. */
+    private static final int SUSTAINED_UNLOCKS = 3;
+    /** Dos desbloqueos separados por más de esto pertenecen a usos distintos. */
+    private static final long WAKE_CLUSTER_GAP_MS = 20 * 60_000L;
+    /** Tope de micro-despertares guardados por hueco. */
+    private static final int MAX_WAKES = 24;
     /** Cada cuánto comprueba la alarma que el servicio sigue vivo. */
     private static final long WATCHDOG_INTERVAL_MS = 15 * 60_000L;
     /**
@@ -215,6 +257,7 @@ public class SleepMonitorService extends Service {
     private boolean foregrounded = false;
 
     private BroadcastReceiver receiver;
+    private SensorWatcher sensorWatcher;
 
     @Override
     public void onCreate() {
@@ -223,6 +266,7 @@ public class SleepMonitorService extends Service {
         createSummaryChannel();
         startInForeground();
         registerDeviceReceiver();
+        applySensors();
         primeScreenState();
         scheduleWatchdog(this);
     }
@@ -236,9 +280,13 @@ public class SleepMonitorService extends Service {
         // Los ajustes pueden haber cambiado entre dos arranques (el usuario
         // activa o desactiva un disparador), así que se vuelve a registrar.
         registerDeviceReceiver();
+        applySensors();
         // Cada rearme es también una oportunidad de darse cuenta de que la
         // señal de vuelta se perdió y el hueco lleva horas sin poder cerrarse.
         healStuckGap(System.currentTimeMillis());
+        // El vigilante pasa cada quince minutos: es un momento barato para
+        // preguntar por la alarma y el audio sin ningún temporizador propio.
+        if (sensorWatcher != null) sensorWatcher.sample();
         scheduleWatchdog(this);
         // START_STICKY: si el sistema mata el servicio por memoria, lo recrea.
         return START_STICKY;
@@ -261,6 +309,9 @@ public class SleepMonitorService extends Service {
     public void onDestroy() {
         unregisterDeviceReceiver();
         stopWatchingForUnlock();
+        wakeWatch.removeCallbacksAndMessages(null);
+        if (sensorWatcher != null) sensorWatcher.stopAll();
+        RawEventLog.flush(this);
         // Si el servicio muere sin que el usuario lo haya apagado, la alarma
         // pendiente lo devolverá a la vida en el próximo ciclo. Que se anote
         // es la única forma de ver después cuántas veces lo mató el sistema
@@ -295,6 +346,22 @@ public class SleepMonitorService extends Service {
             if (part.trim().equals(id)) return true;
         }
         return false;
+    }
+
+    /** Sensores opcionales que el usuario tiene activos. */
+    private Set<String> wantedSensors() {
+        Set<String> out = new HashSet<>();
+        String raw = prefs().getString(KEY_SENSORS, "");
+        for (String part : raw.split(",")) {
+            String id = part.trim();
+            if (!id.isEmpty()) out.add(id);
+        }
+        return out;
+    }
+
+    private void applySensors() {
+        if (sensorWatcher == null) sensorWatcher = new SensorWatcher(this);
+        sensorWatcher.apply(wantedSensors());
     }
 
     /** Deja constancia de un fallo para que Ajustes pueda explicarlo. */
@@ -507,8 +574,13 @@ public class SleepMonitorService extends Service {
         switch (action) {
             case Intent.ACTION_SCREEN_OFF:
                 // Momento en que el uso termina: candidato a inicio del hueco.
+                RawEventLog.add(this, "screen-off");
                 stopWatchingForUnlock();
+                // Antes de abrir: si el uso que acaba de terminar era sostenido,
+                // cierra el hueco de la noche y éste es el principio de otro.
+                screenWentOff(now);
                 openGap(TRIGGER_SCREEN, now, true);
+                if (sensorWatcher != null) sensorWatcher.sample();
                 break;
 
             case Intent.ACTION_USER_PRESENT:
@@ -519,6 +591,7 @@ public class SleepMonitorService extends Service {
                 break;
 
             case Intent.ACTION_SCREEN_ON:
+                RawEventLog.add(this, "screen-on");
                 // Sin bloqueo el usuario ya está delante: encender es volver.
                 // Con bloqueo todavía no se sabe —la pantalla puede haberse
                 // encendido sola por una notificación— así que se vigila el
@@ -528,12 +601,14 @@ public class SleepMonitorService extends Service {
                 break;
 
             case Intent.ACTION_POWER_CONNECTED:
+                RawEventLog.add(this, "plug");
                 // No toca `lastUsedAt`: enchufar el móvil no implica usarlo, y
                 // confundirlo con uso real falsearía el hueco de la pantalla.
                 openGap(TRIGGER_CHARGER, now, false);
                 break;
 
             case Intent.ACTION_POWER_DISCONNECTED:
+                RawEventLog.add(this, "unplug");
                 closeGap(TRIGGER_CHARGER, now, false);
                 break;
 
@@ -544,8 +619,10 @@ public class SleepMonitorService extends Service {
                 // pero llega aunque no haya bloqueo de pantalla, que es
                 // exactamente el hueco que deja el disparador de pantalla.
                 if (deviceIdle()) {
+                    RawEventLog.add(this, "idle-on");
                     openGap(TRIGGER_IDLE, now, false);
                 } else if (interactive()) {
+                    RawEventLog.add(this, "idle-off");
                     closeGap(TRIGGER_IDLE, now, true);
                 } else {
                     // Android sale de Doze cada pocas horas para dejar correr
@@ -562,8 +639,13 @@ public class SleepMonitorService extends Service {
                 // «No molestar» activo: la única señal de las cuatro que
                 // expresa intención y no consecuencia. Quien lo enciende al
                 // acostarse está diciendo la hora a la que se acuesta.
-                if (dndActive()) openGap(TRIGGER_DND, now, false);
-                else closeGap(TRIGGER_DND, now, false);
+                if (dndActive()) {
+                    RawEventLog.add(this, "dnd-on");
+                    openGap(TRIGGER_DND, now, false);
+                } else {
+                    RawEventLog.add(this, "dnd-off");
+                    closeGap(TRIGGER_DND, now, false);
+                }
                 break;
 
             default:
@@ -633,9 +715,13 @@ public class SleepMonitorService extends Service {
             long elapsed = now - openedAt;
             logEvent(this, trigger, "close", "tras " + formatDuration(elapsed));
             if (elapsed >= minGapMs()) {
-                enqueueGap(openedAt, now, trigger, trigger);
+                // Los micro-despertares sólo existen para el hueco de pantalla.
+                long[] wakes = TRIGGER_SCREEN.equals(trigger)
+                    ? takeWakes(openedAt, now) : new long[0];
+                enqueueGap(openedAt, now, trigger, trigger, wakes);
                 edit.remove(shortOpenKey(trigger)).remove(shortCloseKey(trigger));
             } else {
+                if (TRIGGER_SCREEN.equals(trigger)) takeWakes(openedAt, now);
                 logEvent(this, trigger, "discard",
                     formatDuration(elapsed) + " · por debajo del mínimo de "
                         + formatDuration(minGapMs()));
@@ -660,8 +746,172 @@ public class SleepMonitorService extends Service {
      */
     private void userIsBack(long now) {
         stopWatchingForUnlock();
-        closeGap(TRIGGER_SCREEN, now, true);
+        RawEventLog.addDistinct(this, "unlock", 3_000L);
+        screenInUse(now);
         closeGap(TRIGGER_IDLE, now, true);
+    }
+
+    /**
+     * El usuario está delante del móvil. Decide si esto es el final de la noche.
+     *
+     * Sin un hueco de pantalla abierto y ya largo no hay noche en juego y el
+     * desbloqueo cierra el hueco como siempre. Con uno, el primer desbloqueo
+     * sólo es un candidato: se empieza a contar cuánto se usa el móvil, y el
+     * hueco se cierra —con el final en ese primer desbloqueo— cuando el uso se
+     * sostiene ({@link #SUSTAINED_USE_MS} de pantalla, o
+     * {@link #SUSTAINED_UNLOCKS} desbloqueos en un mismo rato). Si el móvil se
+     * apaga antes, era un micro-despertar: queda anotado dentro del hueco.
+     *
+     * Es idempotente durante el mismo uso: SCREEN_ON sin cerrojo, USER_PRESENT
+     * y la vigilancia del cerrojo llegan todos por el mismo desbloqueo.
+     */
+    private void screenInUse(long now) {
+        SharedPreferences p = prefs();
+        long openedAt = p.getLong(openKey(TRIGGER_SCREEN), 0L);
+
+        if (openedAt <= 0 || now - openedAt < minGapMs()) {
+            clearWakeState();
+            closeGap(TRIGGER_SCREEN, now, true);
+            return;
+        }
+        if (p.getLong(KEY_WAKE_ON, 0L) > 0) return;
+
+        long first = p.getLong(KEY_WAKE_FIRST, 0L);
+        long lastOff = p.getLong(KEY_WAKE_LAST_OFF, 0L);
+        long use = p.getLong(KEY_WAKE_USE, 0L);
+        int unlocks = p.getInt(KEY_WAKE_UNLOCKS, 0);
+
+        // Un uso nuevo: el anterior, si lo hubo, no llegó a sostenerse.
+        if (first <= 0 || (lastOff > 0 && now - lastOff > WAKE_CLUSTER_GAP_MS)) {
+            if (first > 0) addWake(first);
+            first = now;
+            use = 0L;
+            unlocks = 0;
+        }
+        unlocks++;
+
+        p.edit()
+            .putLong(KEY_WAKE_FIRST, first)
+            .putLong(KEY_WAKE_USE, use)
+            .putInt(KEY_WAKE_UNLOCKS, unlocks)
+            .putLong(KEY_WAKE_ON, now)
+            .putLong(KEY_LAST_USED, now)
+            .apply();
+        logEvent(this, TRIGGER_SCREEN, "open", "desbloqueo " + unlocks + " tras "
+            + formatDuration(now - openedAt) + " de noche: se espera a ver si el uso se sostiene");
+
+        if (unlocks >= SUSTAINED_UNLOCKS || use >= SUSTAINED_USE_MS) {
+            finalizeWake(now);
+        } else {
+            wakeWatch.removeCallbacksAndMessages(null);
+            wakeWatch.postDelayed(this::checkSustainedUse, Math.max(1_000L, SUSTAINED_USE_MS - use));
+        }
+    }
+
+    /**
+     * La pantalla se apaga. Si estaba en uso dentro de un posible despertar, se
+     * suma el rato y se decide: sostenido, cierra la noche; si no, micro-despertar.
+     */
+    private void screenWentOff(long now) {
+        SharedPreferences p = prefs();
+        long onSince = p.getLong(KEY_WAKE_ON, 0L);
+        if (onSince <= 0) return;
+
+        long use = p.getLong(KEY_WAKE_USE, 0L) + Math.max(0L, now - onSince);
+        p.edit()
+            .putLong(KEY_WAKE_USE, use)
+            .putLong(KEY_WAKE_ON, 0L)
+            .putLong(KEY_WAKE_LAST_OFF, now)
+            .apply();
+        wakeWatch.removeCallbacksAndMessages(null);
+
+        if (use >= SUSTAINED_USE_MS) {
+            finalizeWake(now);
+        } else {
+            logEvent(this, TRIGGER_SCREEN, "discard", "uso de " + formatDuration(use)
+                + " de madrugada: micro-despertar, no cierra la noche");
+        }
+    }
+
+    /** Comprobación diferida: el móvil sigue en uso y ya se ha sostenido lo bastante. */
+    private void checkSustainedUse() {
+        SharedPreferences p = prefs();
+        long onSince = p.getLong(KEY_WAKE_ON, 0L);
+        if (onSince <= 0) return;
+        if (!interactive() || keyguardLocked()) return;
+
+        long now = System.currentTimeMillis();
+        long use = p.getLong(KEY_WAKE_USE, 0L) + Math.max(0L, now - onSince);
+        if (use >= SUSTAINED_USE_MS) {
+            finalizeWake(now);
+        } else {
+            wakeWatch.postDelayed(this::checkSustainedUse, SUSTAINED_USE_MS - use);
+        }
+    }
+
+    /**
+     * El uso se ha sostenido: la noche terminó en el primer desbloqueo del
+     * grupo, no ahora. Se cierra el hueco con ese instante y se anota el uso
+     * real del móvil con la hora de ahora.
+     */
+    private void finalizeWake(long now) {
+        long first = prefs().getLong(KEY_WAKE_FIRST, 0L);
+        wakeWatch.removeCallbacksAndMessages(null);
+        long end = first > 0 ? first : now;
+        // Se limpia el grupo antes de cerrar: `closeGap` lee los micro-despertares
+        // pero no el estado del grupo, y así un cierre fallido no se queda a medias.
+        clearWakeCluster();
+        closeGap(TRIGGER_SCREEN, end, false);
+        prefs().edit().putLong(KEY_LAST_USED, now).apply();
+    }
+
+    private void clearWakeCluster() {
+        prefs().edit()
+            .remove(KEY_WAKE_FIRST)
+            .remove(KEY_WAKE_LAST_OFF)
+            .remove(KEY_WAKE_USE)
+            .remove(KEY_WAKE_UNLOCKS)
+            .remove(KEY_WAKE_ON)
+            .apply();
+    }
+
+    /** Borra el grupo y los micro-despertares: ya no hay noche abierta que los explique. */
+    private void clearWakeState() {
+        clearWakeCluster();
+        prefs().edit().remove(KEY_WAKES).apply();
+        wakeWatch.removeCallbacksAndMessages(null);
+    }
+
+    /** Anota un micro-despertar dentro del hueco abierto. */
+    private void addWake(long at) {
+        String raw = prefs().getString(KEY_WAKES, "");
+        String[] parts = raw.isEmpty() ? new String[0] : raw.split(",");
+        StringBuilder out = new StringBuilder();
+        int from = Math.max(0, parts.length - (MAX_WAKES - 1));
+        for (int i = from; i < parts.length; i++) out.append(parts[i]).append(',');
+        out.append(at);
+        prefs().edit().putString(KEY_WAKES, out.toString()).apply();
+    }
+
+    /** Lee y borra los micro-despertares que caen dentro del hueco que se cierra. */
+    private long[] takeWakes(long start, long end) {
+        String raw = prefs().getString(KEY_WAKES, "");
+        prefs().edit().remove(KEY_WAKES).apply();
+        if (raw.isEmpty()) return new long[0];
+        String[] parts = raw.split(",");
+        long[] tmp = new long[parts.length];
+        int n = 0;
+        for (String part : parts) {
+            try {
+                long at = Long.parseLong(part.trim());
+                if (at > start && at < end) tmp[n++] = at;
+            } catch (NumberFormatException ignored) {
+                // Entrada corrupta: se ignora.
+            }
+        }
+        long[] out = new long[n];
+        System.arraycopy(tmp, 0, out, 0, n);
+        return out;
     }
 
     /**
@@ -689,6 +939,8 @@ public class SleepMonitorService extends Service {
     };
 
     private final Handler unlockWatch = new Handler(Looper.getMainLooper());
+    /** Comprobación diferida de que un uso de pantalla de madrugada se sostiene. */
+    private final Handler wakeWatch = new Handler(Looper.getMainLooper());
 
     private void watchForUnlock() {
         stopWatchingForUnlock();
@@ -719,6 +971,9 @@ public class SleepMonitorService extends Service {
      */
     private void healStuckGap(long now) {
         if (!interactive() || keyguardLocked()) return;
+        // Un uso de madrugada que ya se sostuvo y cuyo temporizador se perdió con
+        // el proceso: se resuelve aquí en vez de dejar el hueco abierto.
+        checkSustainedUse();
         if (prefs().getLong(openKey(TRIGGER_SCREEN), 0L) <= 0
             && prefs().getLong(openKey(TRIGGER_IDLE), 0L) <= 0) return;
 
@@ -763,6 +1018,8 @@ public class SleepMonitorService extends Service {
         PowerManager power = (PowerManager) getSystemService(Context.POWER_SERVICE);
 
         if (triggerOn(TRIGGER_SCREEN) && power != null && !interactive()) {
+            // Si el proceso murió con la pantalla en uso, el SCREEN_OFF se perdió.
+            screenWentOff(now);
             openGap(TRIGGER_SCREEN, now, false);
         } else if (triggerOn(TRIGGER_SCREEN) && keyguardLocked()) {
             // Pantalla encendida y cerrojo puesto al arrancar: el usuario aún
@@ -799,8 +1056,10 @@ public class SleepMonitorService extends Service {
     }
 
     /** Añade un hueco de inactividad a la cola que consumirá la capa web. */
-    private void enqueueGap(long start, long end, String startTrigger, String endTrigger) {
-        enqueueGap(this, start, end, startTrigger, endTrigger);
+    private void enqueueGap(
+        long start, long end, String startTrigger, String endTrigger, long[] wakes
+    ) {
+        enqueueGap(this, start, end, startTrigger, endTrigger, wakes);
         maybeNotifySummary(start, end);
     }
 
@@ -811,6 +1070,12 @@ public class SleepMonitorService extends Service {
      */
     static void enqueueGap(
         Context context, long start, long end, String startTrigger, String endTrigger
+    ) {
+        enqueueGap(context, start, end, startTrigger, endTrigger, new long[0]);
+    }
+
+    static void enqueueGap(
+        Context context, long start, long end, String startTrigger, String endTrigger, long[] wakes
     ) {
         SharedPreferences p = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
         JSONArray gaps;
@@ -826,6 +1091,11 @@ public class SleepMonitorService extends Service {
             gap.put("end", end);
             gap.put("startTrigger", startTrigger);
             gap.put("endTrigger", endTrigger);
+            if (wakes != null && wakes.length > 0) {
+                JSONArray list = new JSONArray();
+                for (long wake : wakes) list.put(wake);
+                gap.put("wakes", list);
+            }
             gaps.put(gap);
         } catch (JSONException e) {
             return;
@@ -841,7 +1111,8 @@ public class SleepMonitorService extends Service {
             .apply();
 
         logEvent(context, endTrigger, "gap", formatDuration(end - start)
-            + " · de " + clock(start) + " a " + clock(end));
+            + " · de " + clock(start) + " a " + clock(end)
+            + (wakes != null && wakes.length > 0 ? " · " + wakes.length + " micro-despertar(es)" : ""));
     }
 
     // --- Aviso con la estimación del sueño al despertar ---

@@ -78,6 +78,12 @@ interface Device {
 
 /** SPEC: SleepMonitorService.REOPEN_GRACE_MS */
 const REOPEN_GRACE_MS = 15 * 60_000;
+/** SPEC: SleepMonitorService.SUSTAINED_USE_MS */
+const SUSTAINED_USE_MS = 5 * 60_000;
+/** SPEC: SleepMonitorService.SUSTAINED_UNLOCKS */
+const SUSTAINED_UNLOCKS = 3;
+/** SPEC: SleepMonitorService.WAKE_CLUSTER_GAP_MS */
+const WAKE_CLUSTER_GAP_MS = 20 * 60_000;
 
 class ServiceModel {
   private openAt = new Map<TriggerId, number>();
@@ -90,6 +96,13 @@ class ServiceModel {
   /** SPEC: SleepMonitorService.watchForUnlock / stopWatchingForUnlock */
   private watchingForUnlock = false;
   lastUsedAt = 0;
+  /** SPEC: SleepMonitorService.KEY_WAKE_* — el grupo de desbloqueos de madrugada. */
+  private wakeFirst = 0;
+  private wakeLastOff = 0;
+  private wakeUse = 0;
+  private wakeUnlocks = 0;
+  private wakeOn = 0;
+  private wakes: number[] = [];
 
   constructor(
     private readonly on: TriggerId[],
@@ -130,11 +143,19 @@ class ServiceModel {
     if (openedAt > 0) {
       const elapsed = now - openedAt;
       if (elapsed >= this.minGapMs) {
-        this.gaps.push({ start: openedAt, end: now, startTrigger: trigger, endTrigger: trigger });
+        const wakes = trigger === 'screen' ? this.takeWakes(openedAt, now) : [];
+        this.gaps.push({
+          start: openedAt,
+          end: now,
+          startTrigger: trigger,
+          endTrigger: trigger,
+          ...(wakes.length ? { wakes } : {}),
+        });
         this.shortOpen.delete(trigger);
         this.shortClose.delete(trigger);
         this.maybeSummary(openedAt, now);
       } else {
+        if (trigger === 'screen') this.takeWakes(openedAt, now);
         // Se recuerda por si esto era una interrupción y no el final.
         this.shortOpen.set(trigger, openedAt);
         this.shortClose.set(trigger, now);
@@ -148,16 +169,87 @@ class ServiceModel {
   /** SPEC: SleepMonitorService.userIsBack */
   private userIsBack(now: number): void {
     this.watchingForUnlock = false;
-    this.close('screen', now, true);
+    this.screenInUse(now);
     // Doze puede haber salido ya con la pantalla apagada, o no haber salido
     // todavía: en ambos casos el usuario está de vuelta.
     this.close('idle', now, true);
+  }
+
+  /** SPEC: SleepMonitorService.screenInUse */
+  private screenInUse(now: number): void {
+    const openedAt = this.openAt.get('screen') ?? 0;
+    if (openedAt <= 0 || now - openedAt < this.minGapMs) {
+      this.clearWakeState();
+      this.close('screen', now, true);
+      return;
+    }
+    if (this.wakeOn > 0) return;
+
+    // Un uso nuevo: el anterior, si lo hubo, no llegó a sostenerse.
+    if (this.wakeFirst <= 0 || (this.wakeLastOff > 0 && now - this.wakeLastOff > WAKE_CLUSTER_GAP_MS)) {
+      if (this.wakeFirst > 0) this.wakes.push(this.wakeFirst);
+      this.wakeFirst = now;
+      this.wakeUse = 0;
+      this.wakeUnlocks = 0;
+    }
+    this.wakeUnlocks++;
+    this.wakeOn = now;
+    this.lastUsedAt = now;
+
+    if (this.wakeUnlocks >= SUSTAINED_UNLOCKS || this.wakeUse >= SUSTAINED_USE_MS) this.finalizeWake(now);
+  }
+
+  /** SPEC: SleepMonitorService.screenWentOff */
+  private screenWentOff(now: number): void {
+    if (this.wakeOn <= 0) return;
+    this.wakeUse += Math.max(0, now - this.wakeOn);
+    this.wakeOn = 0;
+    this.wakeLastOff = now;
+    if (this.wakeUse >= SUSTAINED_USE_MS) this.finalizeWake(now);
+  }
+
+  /** SPEC: SleepMonitorService.checkSustainedUse (el temporizador, antes del evento siguiente) */
+  private advance(at: number): void {
+    if (this.wakeOn <= 0 || !this.device.interactive || this.device.keyguardLocked) return;
+    const due = this.wakeOn + (SUSTAINED_USE_MS - this.wakeUse);
+    if (due <= at) this.finalizeWake(due);
+  }
+
+  /**
+   * Deja pasar el tiempo sin más eventos. Las noches terminan con el primer
+   * desbloqueo, pero lo que decide si ése fue el final es el uso que viene
+   * después, y las simulaciones acaban justo ahí: una persona real sigue
+   * usando el móvil.
+   */
+  settle(at: number): void {
+    this.advance(at);
+  }
+
+  /** SPEC: SleepMonitorService.finalizeWake */
+  private finalizeWake(now: number): void {
+    const end = this.wakeFirst > 0 ? this.wakeFirst : now;
+    this.wakeFirst = this.wakeLastOff = this.wakeUse = this.wakeUnlocks = this.wakeOn = 0;
+    this.close('screen', end, false);
+    this.lastUsedAt = now;
+  }
+
+  private clearWakeState(): void {
+    this.wakeFirst = this.wakeLastOff = this.wakeUse = this.wakeUnlocks = this.wakeOn = 0;
+    this.wakes = [];
+  }
+
+  /** SPEC: SleepMonitorService.takeWakes */
+  private takeWakes(start: number, end: number): number[] {
+    const out = this.wakes.filter((w) => w > start && w < end);
+    this.wakes = [];
+    return out;
   }
 
   /** SPEC: SleepMonitorService.healStuckGap */
   private healStuckGap(now: number): void {
     const dev = this.device;
     if (!dev.interactive || dev.keyguardLocked) return;
+    this.advance(now);
     if ((this.openAt.get('screen') ?? 0) <= 0 && (this.openAt.get('idle') ?? 0) <= 0) return;
     this.userIsBack(now);
   }
@@ -182,12 +274,15 @@ class ServiceModel {
   /** SPEC: SleepMonitorService.handleEvent */
   handle({ at, action }: Event): void {
     const dev = this.device;
+    // El temporizador de uso sostenido salta entre un evento y el siguiente.
+    this.advance(at);
     switch (action) {
       case 'SCREEN_OFF':
         dev.interactive = false;
         // Al apagarse la pantalla el móvil vuelve a echar el cerrojo.
         dev.keyguardLocked = dev.keyguardSecure;
         this.watchingForUnlock = false;
+        this.screenWentOff(at);
         this.open('screen', at, true);
         break;
 
@@ -248,8 +343,10 @@ class ServiceModel {
       case 'SERVICE_START':
         // SPEC: SleepMonitorService.primeScreenState + healStuckGap
         this.healStuckGap(at);
-        if (!dev.interactive) this.open('screen', at, false);
-        else if (dev.keyguardLocked) this.watchingForUnlock = true;
+        if (!dev.interactive) {
+          this.screenWentOff(at);
+          this.open('screen', at, false);
+        } else if (dev.keyguardLocked) this.watchingForUnlock = true;
         if (dev.idle) this.open('idle', at, false);
         if (dev.dnd) this.open('dnd', at, false);
         break;
@@ -438,6 +535,62 @@ const NIGHTS: Night[] = [
       ev('2026-09-19T07:20:00', 'USER_PRESENT'),
     ],
   },
+  {
+    // Mirar la hora a las seis y cuarto no es despertar: se sigue durmiendo
+    // hasta las ocho. Antes el primer desbloqueo cerraba la noche a las 06:19
+    // y la mañana entera quedaba como un segundo hueco que corregir.
+    name: 'desbloqueo de segundos a las 06:19 y despertar a las 08:00',
+    triggers: ['screen'],
+    device: { keyguardSecure: true, interactive: false },
+    truth: { start: '2026-09-18T23:30:00', end: '2026-09-19T08:00:00' },
+    summaries: 1,
+    events: [
+      ev('2026-09-18T23:30:00', 'SCREEN_OFF'),
+      ev('2026-09-19T06:19:00', 'SCREEN_ON'),
+      ev('2026-09-19T06:19:05', 'USER_PRESENT'),
+      ev('2026-09-19T06:19:40', 'SCREEN_OFF'),
+      ev('2026-09-19T08:00:00', 'SCREEN_ON'),
+      ev('2026-09-19T08:00:05', 'USER_PRESENT'),
+    ],
+  },
+  {
+    // Varios desbloqueos cortos seguidos sí son levantarse, aunque cada uno
+    // dure segundos: el final es el primero del grupo.
+    name: 'tres desbloqueos cortos seguidos al despertar',
+    triggers: ['screen'],
+    device: { keyguardSecure: true, interactive: false },
+    truth: { start: '2026-09-18T23:30:00', end: '2026-09-19T07:00:00' },
+    summaries: 1,
+    events: [
+      ev('2026-09-18T23:30:00', 'SCREEN_OFF'),
+      ev('2026-09-19T07:00:00', 'SCREEN_ON'),
+      ev('2026-09-19T07:00:05', 'USER_PRESENT'),
+      ev('2026-09-19T07:00:30', 'SCREEN_OFF'),
+      ev('2026-09-19T07:06:00', 'SCREEN_ON'),
+      ev('2026-09-19T07:06:03', 'USER_PRESENT'),
+      ev('2026-09-19T07:06:40', 'SCREEN_OFF'),
+      ev('2026-09-19T07:12:00', 'SCREEN_ON'),
+      ev('2026-09-19T07:12:03', 'USER_PRESENT'),
+      ev('2026-09-19T07:12:30', 'SCREEN_OFF'),
+    ],
+  },
+  {
+    // Se despierta a las siete, mira la hora y se levanta sin coger el móvil
+    // hasta las 07:50. El desbloqueo de las siete es el despertar de verdad.
+    name: 'se levanta sin coger el móvil tras mirar la hora',
+    triggers: ['screen'],
+    device: { keyguardSecure: true, interactive: false },
+    truth: { start: '2026-09-18T23:30:00', end: '2026-09-19T07:00:00' },
+    summaries: 1,
+    events: [
+      ev('2026-09-18T23:30:00', 'SCREEN_OFF'),
+      ev('2026-09-19T07:00:00', 'SCREEN_ON'),
+      ev('2026-09-19T07:00:05', 'USER_PRESENT'),
+      ev('2026-09-19T07:00:40', 'SCREEN_OFF'),
+      ev('2026-09-19T07:50:00', 'SCREEN_ON'),
+      ev('2026-09-19T07:50:05', 'USER_PRESENT'),
+    ],
+  },
 ];
 
 // --- Ejecución --------------------------------------------------------------
@@ -478,6 +631,8 @@ function runNight(night: Night): {
     device,
   );
   for (const event of night.events) service.handle(event);
+  // Tras el último evento el día sigue: el móvil se usa con normalidad.
+  service.settle(night.events[night.events.length - 1].at + 30 * 60_000);
 
   const { results } = evaluateGaps(service.gaps, settings);
   return {
@@ -549,6 +704,7 @@ function runEvents(events: Event[], device: Partial<Device> = {}): ServiceModel 
   };
   const model = new ServiceModel(['screen'], 180 * 60_000, dev);
   for (const e of events) model.handle(e);
+  if (events.length) model.settle(events[events.length - 1].at + 30 * 60_000);
   return model;
 }
 

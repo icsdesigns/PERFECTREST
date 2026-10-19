@@ -1,5 +1,6 @@
 package com.perfectrest.app;
 
+import android.Manifest;
 import android.app.ActivityManager;
 import android.app.AlarmManager;
 import android.app.NotificationManager;
@@ -20,8 +21,11 @@ import com.getcapacitor.JSArray;
 import com.getcapacitor.JSObject;
 import com.getcapacitor.Plugin;
 import com.getcapacitor.PluginCall;
+import com.getcapacitor.PermissionState;
 import com.getcapacitor.PluginMethod;
 import com.getcapacitor.annotation.CapacitorPlugin;
+import com.getcapacitor.annotation.Permission;
+import com.getcapacitor.annotation.PermissionCallback;
 
 import org.json.JSONArray;
 import org.json.JSONException;
@@ -47,7 +51,14 @@ import java.util.Set;
  * {@link #diagnostics} los expone todos y hay un método para abrir la pantalla
  * de ajustes de cada uno.
  */
-@CapacitorPlugin(name = "SleepMonitor")
+@CapacitorPlugin(
+    name = "SleepMonitor",
+    permissions = {
+        // Sólo para el contador de pasos (Android 10+). Sin él se usa el
+        // movimiento significativo, que no pide nada.
+        @Permission(strings = {Manifest.permission.ACTIVITY_RECOGNITION}, alias = "activity")
+    }
+)
 public class SleepMonitorPlugin extends Plugin {
 
     /** Margen antes de dar por muerto un servicio que no da señales de vida. */
@@ -75,9 +86,22 @@ public class SleepMonitorPlugin extends Plugin {
             if (!ids.isEmpty()) triggers = TextUtils.join(",", ids);
         }
 
+        // Sensores opcionales (fase 2): lista vacía o ausente = ninguno.
+        String sensors = "";
+        JSArray rawSensors = call.getArray("sensors");
+        if (rawSensors != null) {
+            List<String> ids = new ArrayList<>();
+            for (int i = 0; i < rawSensors.length(); i++) {
+                String id = rawSensors.optString(i, null);
+                if (id != null && !id.isEmpty()) ids.add(id);
+            }
+            sensors = TextUtils.join(",", ids);
+        }
+
         prefs().edit()
             .putInt(SleepMonitorService.KEY_MIN_GAP, minGap)
             .putString(SleepMonitorService.KEY_TRIGGERS, triggers)
+            .putString(SleepMonitorService.KEY_SENSORS, sensors)
             // El aviso del despertar lo dispara el servicio, no la web: para
             // eso tiene que conocer el ajuste y la ventana nocturna.
             .putBoolean(SleepMonitorService.KEY_SUMMARY, call.getBoolean("wakeSummary", false))
@@ -287,6 +311,64 @@ public class SleepMonitorPlugin extends Plugin {
         } catch (JSONException e) {
             ret.put("events", new JSONArray());
         }
+        call.resolve(ret);
+    }
+
+    /**
+     * Registro bruto: pantalla, cargador y sensores, un evento por línea. La web
+     * lo cruza con cada hueco y lo exporta tal cual. Como el de eventos, no se
+     * borra al leerlo.
+     */
+    @PluginMethod
+    public void getRawEvents(PluginCall call) {
+        JSObject ret = new JSObject();
+        ret.put("events", RawEventLog.read(getContext()));
+        call.resolve(ret);
+    }
+
+    @PluginMethod
+    public void clearRawEvents(PluginCall call) {
+        RawEventLog.clear(getContext());
+        call.resolve();
+    }
+
+    /**
+     * Qué sensores tiene el móvil y cómo funcionaría cada uno con los permisos
+     * actuales, para que Ajustes lo explique en vez de dejar un interruptor que
+     * no hace nada.
+     */
+    @PluginMethod
+    public void sensorStatus(PluginCall call) {
+        JSObject ret = new JSObject();
+        try {
+            ret.put("sensors", SensorWatcher.describe(getContext()));
+        } catch (JSONException e) {
+            call.reject("No se pudo leer el estado de los sensores");
+            return;
+        }
+        call.resolve(ret);
+    }
+
+    /**
+     * Pide el permiso «Actividad física», que sólo necesita el contador de
+     * pasos. Antes de Android 10 no existe y se da por concedido; denegado, la
+     * app sigue funcionando con el movimiento significativo.
+     */
+    @PluginMethod
+    public void requestSensorPermission(PluginCall call) {
+        if (SensorWatcher.activityPermissionGranted(getContext())) {
+            JSObject ret = new JSObject();
+            ret.put("granted", true);
+            call.resolve(ret);
+            return;
+        }
+        requestPermissionForAlias("activity", call, "activityPermissionResult");
+    }
+
+    @PermissionCallback
+    private void activityPermissionResult(PluginCall call) {
+        JSObject ret = new JSObject();
+        ret.put("granted", getPermissionState("activity") == PermissionState.GRANTED);
         call.resolve(ret);
     }
 

@@ -163,6 +163,10 @@ defensas lo evitan:
 - La capa web **agrupa** los huecos que describen una misma noche —solapados o
   separados por menos de 15 minutos, lo mismo que aguanta el servicio— en vez de
   exigir solape estricto.
+- Un **desvelo de madrugada** con el móvil en la mano (hasta hora y media) no
+  parte la noche: si el primer trozo no es una noche entera por sí solo (menos de
+  4 h 30 min) y empieza a tu hora, se une con el siguiente. La mañana quieta de
+  después de una noche completa, o la tarde de antes, siguen sin pegarse.
 
 De cada grupo se toma el borde de la **señal más directa** que contenga: la
 pantalla, que mide el bloqueo real, manda sobre el cargador (que se enchufa

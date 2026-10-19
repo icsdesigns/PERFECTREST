@@ -182,6 +182,25 @@ console.log('\n--- Precisión: una noche principal por día ---');
   assert('y queda anotada como descartada',
     sep.rejected.length === 1, sep.rejected.map((r) => r.reason));
 
+  // Desvelo de 40 min con el móvil a las tres: la noche queda en dos huecos y
+  // el segundo, que empieza de madrugada, ya no se pierde.
+  const desvelo = evaluateGaps(
+    [gap('2026-09-18T23:30:00', '2026-09-19T03:00:00'), gap('2026-09-19T03:40:00', '2026-09-19T08:00:00')],
+    MON,
+  );
+  assert('un desvelo de madrugada no parte la noche ni pierde la segunda mitad',
+    desvelo.results.length === 1 &&
+      clock(desvelo.results[0].session.start) === '23:30' &&
+      clock(desvelo.results[0].session.end) === '08:00',
+    desvelo.results.map((r) => `${clock(r.session.start)}→${clock(r.session.end)}`));
+  const tardeAntes = evaluateGaps(
+    [gap('2026-09-18T19:40:00', '2026-09-18T23:20:00'), gap('2026-09-19T00:10:00', '2026-09-19T08:00:00')],
+    MON,
+  );
+  assert('pero la tarde quieta de antes de acostarse no se une a la noche',
+    tardeAntes.results.length === 1 && clock(tardeAntes.results[0].session.start) === '00:10',
+    tardeAntes.results.map((r) => `${clock(r.session.start)}→${clock(r.session.end)}`));
+
   const tarde = evaluateGaps([gap('2026-09-23T16:21:00', '2026-09-23T19:37:00')], MON);
   assert('una tarde quieta de 3h fuera de tu hora de acostarte se descarta',
     tarde.results.length === 0 && tarde.rejected.length === 1, tarde.rejected[0]?.reason);

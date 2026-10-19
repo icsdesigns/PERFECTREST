@@ -712,7 +712,7 @@ export function evaluateGaps(
   // fusionada, no sobre cada trozo: el rabo de una noche partida por un
   // desbloqueo también es corto y empieza de madrugada. Lo que no encaja sólo
   // sobrevive si trae indicios propios de siesta.
-  const fused = mergeDetections(raw, settings, habit);
+  const fused = joinInterruptedNights(mergeDetections(raw, settings, habit), settings, habit);
   const merged: DetectionResult[] = [];
   for (const r of fused) {
     const { start, end } = r.session;
@@ -734,6 +734,51 @@ export function evaluateGaps(
     rejected.push({ gap, reason: 'secondary', trigger: gap.endTrigger });
   }
   return { results: kept, rejected };
+}
+
+/** Rato despierto de madrugada (con el móvil en la mano) que aún deja la noche en una pieza. */
+const AWAKE_BRIDGE_MS = 90 * MINUTE;
+
+/**
+ * Une la noche que un rato despierto partió en dos.
+ *
+ * El puente de `mergeDetections` es corto a propósito (15 min), para no pegar
+ * la mañana a la noche. Pero quien se desvela a las tres y pasa media hora con
+ * el móvil deja dos huecos: el primero corto (23:30-03:00) y el segundo, que
+ * empieza de madrugada, también puede serlo (03:40-08:00). Por separado el
+ * segundo no pasa por noche y se perdía, y con él cuatro horas de sueño.
+ *
+ * Se unen sólo cuando el primer trozo **no es una noche entera por sí solo**
+ * (menos de 4 h 30 min) y es de noche de verdad (empieza cerca de tu hora de
+ * acostarte y pasa de ella); así la mañana quieta de después de una noche
+ * completa, o la tarde quieta de antes, siguen sin pegarse. El rato despierto
+ * queda dentro de la sesión, que es editable; perder la mitad de la noche no
+ * tenía arreglo.
+ */
+function joinInterruptedNights(
+  results: DetectionResult[],
+  settings: MonitorSettings,
+  habit: SleepHabit,
+): DetectionResult[] {
+  const sorted = [...results].sort((a, b) => a.session.start - b.session.start);
+  const out: DetectionResult[] = [];
+  for (const r of sorted) {
+    const prev = out[out.length - 1];
+    if (
+      prev &&
+      !prev.session.nap &&
+      prev.session.end - prev.session.start < SHORT_NIGHT_MS &&
+      fitsNight(prev.session.start, prev.session.end, settings) &&
+      !outOfPattern(prev.session.start, prev.session.end, habit) &&
+      r.session.start - prev.session.end <= AWAKE_BRIDGE_MS &&
+      r.session.end - prev.session.start <= MAX_PLAUSIBLE_SLEEP_MS
+    ) {
+      out[out.length - 1] = fuseCluster([prev, r], settings, habit);
+      continue;
+    }
+    out.push(r);
+  }
+  return out;
 }
 
 /** Cuánto tiene que superar una candidata a la propuesta sin revisar que ya ocupa su noche. */

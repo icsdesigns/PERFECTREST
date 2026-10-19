@@ -28,6 +28,7 @@ import {
 } from '../lib/triggerLog';
 import { TRIGGERS, TRIGGER_SHORT, triggerEnabled } from '../lib/triggers';
 import { HOUR, formatDuration, relativeDayLabel } from '../lib/time';
+import { exportSessions, type ExportFormat } from '../lib/exportSessions';
 import { useStore } from '../state/store';
 import { useAppUpdate } from '../state/update';
 import { UpdateBanner } from '../components/UpdateBanner';
@@ -39,6 +40,7 @@ export function SettingsScreen() {
   const { monitor, theme } = state;
   const [permission, setPermission] = useState<PermissionState>('prompt');
   const [confirmReset, setConfirmReset] = useState(false);
+  const [exportError, setExportError] = useState(false);
   const [service, setService] = useState<MonitorStatus>({
     running: false,
     enabled: false,
@@ -52,6 +54,14 @@ export function SettingsScreen() {
     lastError: null,
   });
   const backgroundReady = isBackgroundAvailable();
+
+  const doExport = (format: ExportFormat) => {
+    setExportError(false);
+    exportSessions(state.sessions, format).catch((e) => {
+      // Cerrar la hoja de compartir sin elegir destino no es un error.
+      if (!/cancel/i.test(String(e?.message ?? e))) setExportError(true);
+    });
+  };
 
   const refresh = () => {
     void currentPermission().then(setPermission);
@@ -288,6 +298,27 @@ export function SettingsScreen() {
           </div>
           <Pill tone="primary">{state.sessions.length}</Pill>
         </div>
+        <div className="pending__actions" style={{ marginTop: 'var(--sp-3)' }}>
+          <button
+            className="btn btn--ghost"
+            disabled={state.sessions.length === 0}
+            onClick={() => doExport('csv')}
+          >
+            Exportar CSV
+          </button>
+          <button
+            className="btn btn--ghost"
+            disabled={state.sessions.length === 0}
+            onClick={() => doExport('json')}
+          >
+            Exportar JSON
+          </button>
+        </div>
+        {exportError && (
+          <p style={{ fontSize: '0.76rem', color: 'var(--amber)', marginTop: 'var(--sp-2)' }}>
+            No se pudo exportar. Inténtalo de nuevo.
+          </p>
+        )}
         {confirmReset ? (
           <div className="pending__actions">
             <button className="btn btn--ghost" onClick={() => setConfirmReset(false)}>

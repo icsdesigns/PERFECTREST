@@ -367,8 +367,23 @@ public class SleepMonitorPlugin extends Plugin {
 
     @PermissionCallback
     private void activityPermissionResult(PluginCall call) {
+        boolean granted = getPermissionState("activity") == PermissionState.GRANTED;
+        // El servicio pasa del movimiento significativo al contador de pasos al
+        // rearmarse; sin esto tardaría hasta el siguiente vigilante (15 min).
+        if (granted && prefs().getBoolean(SleepMonitorService.KEY_ENABLED, false)) {
+            Intent intent = new Intent(getContext(), SleepMonitorService.class);
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    getContext().startForegroundService(intent);
+                } else {
+                    getContext().startService(intent);
+                }
+            } catch (Exception ignored) {
+                // Lo recogerá el vigilante en su próxima pasada.
+            }
+        }
         JSObject ret = new JSObject();
-        ret.put("granted", getPermissionState("activity") == PermissionState.GRANTED);
+        ret.put("granted", granted);
         call.resolve(ret);
     }
 

@@ -320,7 +320,7 @@ export function SettingsScreen() {
       {monitor.enabled && (
         <Card
           title="Sensores opcionales"
-          sub="Afinan cuándo empezaste a dormir y cuándo te despertaste: el último uso del móvil suele ser una o dos horas anterior a dormirte. Están apagados por defecto, consumen muy poca batería y ninguno usa el micrófono."
+          sub="Ayudan a acertar cuándo te dormiste y cuándo te despertaste: dejar el móvil no es dormirse, y entre una cosa y otra suele pasar una hora o más. Vienen apagados, gastan muy poca batería y ninguno usa el micrófono ni la cámara."
         >
           {SENSORS.map((sensor) => {
             const status = sensorStatus[sensor.id];

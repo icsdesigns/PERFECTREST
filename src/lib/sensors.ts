@@ -27,19 +27,19 @@ export const SENSORS: SensorSpec[] = [
   {
     id: 'steps',
     label: 'Pasos y movimiento',
-    hint: 'Detecta que te levantas o sigues andando por casa: ajusta cuándo empiezas a dormir y cuándo despiertas. Pide el permiso «Actividad física»; sin él usa sólo el movimiento significativo, menos fino.',
+    hint: 'Nota si sigues andando por casa después de dejar el móvil o si te levantas antes de cogerlo: ajusta cuándo te dormiste y cuándo despertaste. Pide el permiso «Actividad física»; sin él usa sólo el movimiento significativo, que es menos fino.',
     needsPermission: true,
   },
   {
     id: 'light',
     label: 'Luz ambiente',
-    hint: 'Apagar la luz de la habitación es la señal más clara de que te vas a dormir. Sólo anota si hay luz u oscuridad, nunca imágenes.',
+    hint: 'Apagar la luz de la habitación es la señal más clara de que te vas a dormir. Sólo anota si hay luz, penumbra u oscuridad, nunca imágenes. Funciona mejor con el móvil boca arriba: boca abajo siempre parece de noche.',
     needsPermission: false,
   },
   {
     id: 'proximity',
     label: 'Proximidad',
-    hint: 'Sabe si el móvil está tapado (bolsillo, mesilla boca abajo) y cuándo lo vuelves a coger, aunque no lo desbloquees.',
+    hint: 'Nota si el móvil está tapado (en el bolsillo o boca abajo) y cuándo lo destapas, aunque no lo desbloquees. Sólo se usa si tu móvil tiene la versión del sensor que no lo despierta, para no gastar batería.',
     needsPermission: false,
   },
   {

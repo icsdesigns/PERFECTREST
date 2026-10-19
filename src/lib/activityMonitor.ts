@@ -76,7 +76,37 @@ export interface DetectionContext {
   /** Registro bruto del servicio, para cruzarlo con los huecos (sensores). */
   events?: RawEvent[];
   /** Noches ya registradas o a la espera de confirmar: ya tienen su noche principal. */
-  known?: Array<{ start: number; end: number }>;
+  known?: KnownNight[];
+}
+
+/**
+ * Una noche que ya existe. Sin `rank` es firme (la registró o confirmó el
+ * usuario) y ningún hueco del mismo día la desplaza; con `rank` es una
+ * propuesta sin revisar, y una candidata claramente mejor sí puede ponerse
+ * delante —la tarde quieta que se propuso anoche no debe tapar la noche de
+ * verdad que llega por la mañana.
+ */
+export interface KnownNight {
+  start: number;
+  end: number;
+  rank?: number;
+}
+
+/** Peso de una propuesta sin revisar, en la misma escala que usa la elección de noche. */
+const CONFIDENCE_RANK: Record<Confidence, number> = { high: 0.8, medium: 0.55, low: 0.3 };
+
+/** Convierte las sesiones del store en las noches que la evaluación ya da por existentes. */
+export function knownNights(sessions: SleepSession[], pending: SleepSession[] = []): KnownNight[] {
+  const rank = (s: SleepSession) =>
+    CONFIDENCE_RANK[s.confidence] + Math.min(s.end - s.start, 10 * HOUR) / (40 * HOUR);
+  return [
+    ...sessions.map((s) => ({
+      start: s.start,
+      end: s.end,
+      rank: s.confirmed && s.source === 'auto' && !s.note ? rank(s) : undefined,
+    })),
+    ...pending.map((s) => ({ start: s.start, end: s.end, rank: rank(s) })),
+  ];
 }
 
 /** Contexto de un solo hueco: lo que `evaluateGap` necesita de fuera. */
@@ -85,6 +115,8 @@ export interface GapContext {
   evidence?: GapEvidence | null;
   /** Bordes tal como los midió el dispositivo, si se han recortado antes. */
   detected?: { start: number; end: number };
+  /** El inicio se ha deducido de tu hábito, no medido: nunca pasa de confianza baja. */
+  inferred?: boolean;
   /**
    * No exigir que el hueco toque la ventana nocturna. Lo usa `evaluateGaps`,
    * que lo juzga después de fusionar y dejando pasar las siestas con indicios.
@@ -106,6 +138,13 @@ export interface GapContext {
  * metía en el historial horas de sueño que nadie había dormido.
  */
 export const MAX_PLAUSIBLE_SLEEP_MS = 13 * HOUR;
+
+/**
+ * Lo que `refineEdges` le quita al hueco (latencia al inicio, 5 min al final).
+ * El techo se mide sobre la noche ya refinada, no sobre el hueco crudo: un
+ * hueco de 13h20 es una noche de 13h una vez corregida.
+ */
+const REFINE_MARGIN_MS = 30 * MINUTE;
 
 /** Una noche dura al menos esto; por debajo es una siesta larga o una tarde quieta. */
 export const SHORT_NIGHT_MS = 4.5 * HOUR;
@@ -207,7 +246,7 @@ function assessGap(
   // —sólo baja la confianza— y con «guardar sin preguntar» activo eso mete
   // horas de «sueño» en el historial sin que nadie las vea. Hay que
   // descartarlo aquí: ninguna corrección posterior salva un dato así.
-  if (gapMs > MAX_PLAUSIBLE_SLEEP_MS) return { reject: 'too-long' };
+  if (gapMs > MAX_PLAUSIBLE_SLEEP_MS + REFINE_MARGIN_MS) return { reject: 'too-long' };
 
   const habit = ctx.habit ?? DEFAULT_HABIT;
 
@@ -248,7 +287,7 @@ function assessGap(
         start,
         end,
         source: 'auto',
-        confidence,
+        confidence: ctx.inferred ? 'low' : confidence,
         confirmed: false,
         triggers: sortTriggers(triggers),
         detectedStart: ctx.detected?.start ?? lastActive,
@@ -532,10 +571,10 @@ const BEDTIME_WAKE_REACH_MIN = 150;
 function trimGap(
   gap: NativeGap,
   habit: SleepHabit,
-): { start: number; end: number } {
+): { start: number; end: number; inferred: boolean } {
   let { start, end } = gap;
   const wakes = (gap.wakes ?? []).filter((w) => w > start && w < end).sort((a, b) => a - b);
-  if (!wakes.length) return { start, end };
+  if (!wakes.length) return overlongByHabit(start, end, habit);
 
   // Final: se retrocede por la cadena de micro-despertares pegados al uso.
   let pulled = end;
@@ -548,16 +587,46 @@ function trimGap(
   // Inicio.
   const towardsHabit = (ts: number) => Math.abs(minuteDiff(minutesOfDay(ts), habit.startMin));
   const candidates = wakes.filter((w) => end - w >= MIN_TAIL_MS && end - w <= MAX_PLAUSIBLE_SLEEP_MS);
-  if (end - start > MAX_PLAUSIBLE_SLEEP_MS) {
+  if (end - start > MAX_PLAUSIBLE_SLEEP_MS + REFINE_MARGIN_MS) {
     // Obligado: el hueco entero no cabe en una noche.
     if (candidates.length) {
       start = candidates.reduce((best, w) => (towardsHabit(w) <= towardsHabit(best) ? w : best));
+    } else {
+      return overlongByHabit(start, end, habit);
     }
   } else if (minuteDiff(minutesOfDay(start), habit.startMin) < -EARLY_START_SUSPECT_MIN) {
     const near = candidates.filter((w) => towardsHabit(w) <= BEDTIME_WAKE_REACH_MIN);
     if (near.length) start = near[near.length - 1];
   }
-  return { start, end };
+  return { start, end, inferred: false };
+}
+
+/**
+ * Un hueco que pasa del techo y no tiene micro-despertares con que partirlo.
+ *
+ * Con datos reales casi todos eran una tarde sin tocar el móvil seguida de una
+ * noche de verdad (se acostaba a la una y el móvil llevaba quieto desde las
+ * ocho). Descartarlos perdía noches reales; proponerlos enteros metía horas de
+ * sueño que nadie durmió. Lo que queda es empezar la noche a tu hora de
+ * acostarte, siempre que esa hora caiga dentro del hueco y deje una noche
+ * creíble, y proponerla con confianza baja para que la corrijas. Si la hora de
+ * acostarte no cae dentro, el hueco es el móvil olvidado y no hay noche.
+ */
+function overlongByHabit(
+  start: number,
+  end: number,
+  habit: SleepHabit,
+): { start: number; end: number; inferred: boolean } {
+  if (end - start <= MAX_PLAUSIBLE_SLEEP_MS + REFINE_MARGIN_MS) return { start, end, inferred: false };
+  const first = new Date(start);
+  first.setHours(Math.floor(habit.startMin / 60), habit.startMin % 60, 0, 0);
+  for (let d = 0; d < 2; d++) {
+    const cand = first.getTime() + d * 24 * HOUR - HABIT_START_SLACK_MS;
+    if (cand < start) continue;
+    const tail = end - cand;
+    if (tail >= MIN_TAIL_MS && tail <= MAX_PLAUSIBLE_SLEEP_MS) return { start: cand, end, inferred: true };
+  }
+  return { start, end, inferred: false };
 }
 
 /**
@@ -589,7 +658,7 @@ export function evaluateGaps(
       continue;
     }
 
-    const { start, end } = trimGap(gap, habit);
+    const { start, end, inferred } = trimGap(gap, habit);
     // Los sensores miran el tramo ya recortado: si no, la tarde despierta
     // entraría en las cuentas de quietud y oscuridad de la noche.
     const evidence = ctx.events?.length ? gatherEvidence(ctx.events, start, end, sensors) : null;
@@ -598,6 +667,7 @@ export function evaluateGaps(
       evidence: evidence && evidence.sensors.length ? evidence : null,
       detected: { start: gap.start, end: gap.end },
       lenient: true,
+      inferred,
     });
     if ('result' in out) {
       raw.push(out.result);
@@ -635,6 +705,9 @@ export function evaluateGaps(
   return { results: kept, rejected };
 }
 
+/** Cuánto tiene que superar una candidata a la propuesta sin revisar que ya ocupa su noche. */
+const BETTER_NIGHT_MARGIN = 0.1;
+
 /** El hueco crudo que dio lugar a una detección, para anotar su descarte. */
 function gapOf(r: DetectionResult): NativeGap {
   const trigger = r.session.triggers?.[0] ?? 'screen';
@@ -667,24 +740,29 @@ function nightKey(start: number, end: number): string {
  */
 function pickMainNights(
   results: DetectionResult[],
-  known: Array<{ start: number; end: number }>,
+  known: KnownNight[],
 ): { kept: DetectionResult[]; dropped: DetectionResult[] } {
   const groups = new Map<string, DetectionResult[]>();
   for (const r of results) {
     const key = nightKey(r.session.start, r.session.end);
     groups.set(key, [...(groups.get(key) ?? []), r]);
   }
-  const knownKeys = new Set(known.map((k) => nightKey(k.start, k.end)));
+  // Lo mejor que ya hay en cada noche; una firme (sin `rank`) no se supera nunca.
+  const held = new Map<string, number>();
+  for (const k of known) {
+    const key = nightKey(k.start, k.end);
+    held.set(key, Math.max(held.get(key) ?? -Infinity, k.rank ?? Infinity));
+  }
   const rank = (r: DetectionResult) => (r.score ?? 0.5) + Math.min(r.gapMs, 10 * HOUR) / (40 * HOUR);
 
   const kept: DetectionResult[] = [];
   const dropped: DetectionResult[] = [];
   for (const [key, group] of groups) {
     const ordered = [...group].filter((r) => !r.session.nap).concat(group.filter((r) => r.session.nap)).sort((a, b) => rank(b) - rank(a));
-    const hasMain = knownKeys.has(key);
+    const holds = held.get(key);
     ordered.forEach((r, i) => {
       if (r.session.nap) kept.push(r); // ya viene con sus indicios
-      else if (i === 0 && !hasMain) kept.push(r);
+      else if (i === 0 && (holds === undefined || rank(r) > holds + BETTER_NIGHT_MARGIN)) kept.push(r);
       else if (napEvidence(r)) kept.push(asNap(r));
       else dropped.push(r);
     });

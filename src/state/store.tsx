@@ -13,6 +13,7 @@ import { DEFAULT_GOALS } from '../lib/schedule';
 import { loadJSON, saveJSON } from '../lib/storage';
 import {
   activeNativeTriggers,
+  knownNights,
   proposeFromSchedule,
   readScheduleMark,
   refineEdges,
@@ -278,7 +279,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       onDetect: propose,
       getContext: () => ({
         habit: habitNow(),
-        known: [...stateRef.current.sessions, ...stateRef.current.pendingSessions],
+        known: knownNights(stateRef.current.sessions, stateRef.current.pendingSessions),
       }),
       onBeat: (ts) => dispatch({ type: 'patch', patch: { lastActiveAt: ts } }),
       onDeviceUse: (ts) => dispatch({ type: 'patch', patch: { lastDeviceUseAt: ts } }),

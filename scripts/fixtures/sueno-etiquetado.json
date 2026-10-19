@@ -1,0 +1,414 @@
+[
+ {
+  "id": "auto-1790030987169",
+  "start": 1790031887169,
+  "end": 1790056924573,
+  "source": "auto",
+  "confidence": "high",
+  "triggers": [
+   "screen"
+  ]
+ },
+ {
+  "id": "auto-1790058244869",
+  "start": 1790059144869,
+  "end": 1790069236552,
+  "source": "auto",
+  "confidence": "low",
+  "triggers": [
+   "screen"
+  ]
+ },
+ {
+  "id": "auto-1790117371053",
+  "start": 1790118271053,
+  "end": 1790143766886,
+  "source": "auto",
+  "confidence": "high",
+  "triggers": [
+   "screen"
+  ]
+ },
+ {
+  "id": "auto-1790144101003",
+  "start": 1790145001003,
+  "end": 1790154911244,
+  "source": "auto",
+  "confidence": "low",
+  "triggers": [
+   "screen"
+  ]
+ },
+ {
+  "id": "auto-1790179600288",
+  "start": 1790180500288,
+  "end": 1790192263533,
+  "source": "auto",
+  "confidence": "medium",
+  "triggers": [
+   "screen"
+  ]
+ },
+ {
+  "id": "auto-1790192770119",
+  "start": 1790193670119,
+  "end": 1790229958149,
+  "source": "auto",
+  "confidence": "high",
+  "triggers": [
+   "screen"
+  ]
+ },
+ {
+  "id": "auto-1790231543907",
+  "start": 1790232443907,
+  "end": 1790242305366,
+  "source": "auto",
+  "confidence": "low",
+  "triggers": [
+   "screen"
+  ]
+ },
+ {
+  "id": "auto-1790270769721",
+  "start": 1790271669721,
+  "end": 1790284903108,
+  "source": "auto",
+  "confidence": "medium",
+  "triggers": [
+   "screen"
+  ]
+ },
+ {
+  "id": "auto-1790288079575",
+  "start": 1790288979575,
+  "end": 1790329005252,
+  "source": "auto",
+  "confidence": "medium",
+  "triggers": [
+   "screen"
+  ]
+ },
+ {
+  "id": "auto-1790373121348",
+  "start": 1790374021348,
+  "end": 1790416729186,
+  "source": "auto",
+  "confidence": "medium",
+  "triggers": [
+   "screen"
+  ]
+ },
+ {
+  "id": "auto-1790439840068",
+  "start": 1790440740068,
+  "end": 1790500033162,
+  "source": "auto",
+  "confidence": "low",
+  "triggers": [
+   "screen"
+  ]
+ },
+ {
+  "id": "auto-1790539660000",
+  "start": 1790540560000,
+  "end": 1790573442859,
+  "source": "auto",
+  "confidence": "high",
+  "triggers": [
+   "screen"
+  ],
+  "note": "Empecé a dormir a las 00:10"
+ },
+ {
+  "id": "auto-1790574657310",
+  "start": 1790575557310,
+  "end": 1790588698589,
+  "source": "auto",
+  "confidence": "medium",
+  "triggers": [
+   "screen"
+  ]
+ },
+ {
+  "id": "auto-1790634502605",
+  "start": 1790635402605,
+  "end": 1790682619732,
+  "source": "auto",
+  "confidence": "low",
+  "triggers": [
+   "screen"
+  ],
+  "note": "Me acosté casi a las 1:00"
+ },
+ {
+  "id": "auto-1790709200403",
+  "start": 1790710100403,
+  "end": 1790760240015,
+  "source": "auto",
+  "confidence": "low",
+  "triggers": [
+   "screen"
+  ],
+  "note": "No he dormido aun en este periodo\nEs correcto"
+ },
+ {
+  "id": "auto-1790788839902",
+  "start": 1790789739902,
+  "end": 1790799357563,
+  "source": "auto",
+  "confidence": "low",
+  "triggers": [
+   "screen"
+  ]
+ },
+ {
+  "id": "auto-1790809394940",
+  "start": 1790810294940,
+  "end": 1790845322442,
+  "source": "auto",
+  "confidence": "medium",
+  "triggers": [
+   "screen"
+  ],
+  "note": "Me fui a dormir unos minutos antes pero es un error aceptable"
+ },
+ {
+  "id": "auto-1790879304682",
+  "start": 1790880204682,
+  "end": 1790890911670,
+  "source": "auto",
+  "confidence": "low",
+  "triggers": [
+   "screen"
+  ],
+  "note": "Esto es falso, tan solo ha estado inactivo. Es inviable dormir solo ese tiempo"
+ },
+ {
+  "id": "auto-1790896465899",
+  "start": 1790897365899,
+  "end": 1790933591963,
+  "source": "auto",
+  "confidence": "medium",
+  "triggers": [
+   "screen"
+  ],
+  "note": "Correcto"
+ },
+ {
+  "id": "auto-1790976062865",
+  "start": 1790976962865,
+  "end": 1791019761299,
+  "source": "auto",
+  "confidence": "medium",
+  "triggers": [
+   "screen"
+  ],
+  "note": "Me acosté sobre las 12:30"
+ },
+ {
+  "id": "auto-1791048369704",
+  "start": 1791049269704,
+  "end": 1791102615559,
+  "source": "auto",
+  "confidence": "low",
+  "triggers": [
+   "screen"
+  ],
+  "note": "Me acosté sobre las 01:30"
+ },
+ {
+  "id": "auto-1791154614825",
+  "start": 1791155514825,
+  "end": 1791190558638,
+  "source": "auto",
+  "confidence": "medium",
+  "triggers": [
+   "screen"
+  ],
+  "note": "Correcto"
+ },
+ {
+  "id": "auto-1791231989265",
+  "start": 1791232889265,
+  "end": 1791277374424,
+  "source": "auto",
+  "confidence": "medium",
+  "triggers": [
+   "screen"
+  ],
+  "note": "Me acosté sobre las 01:00"
+ },
+ {
+  "id": "auto-1791328811521",
+  "start": 1791329711521,
+  "end": 1791364868166,
+  "source": "auto",
+  "confidence": "medium",
+  "triggers": [
+   "screen"
+  ],
+  "note": "Me fui a dormir unos minutos antes, pero es un margen aceptable"
+ },
+ {
+  "id": "auto-1791414518793",
+  "start": 1791415418793,
+  "end": 1791452522530,
+  "source": "auto",
+  "confidence": "medium",
+  "triggers": [
+   "screen"
+  ],
+  "note": "Correcto"
+ },
+ {
+  "id": "auto-1791491603916",
+  "start": 1791492503916,
+  "end": 1791522566429,
+  "source": "auto",
+  "confidence": "high",
+  "triggers": [
+   "screen"
+  ],
+  "note": "Me acosté sobre las 00:30"
+ },
+ {
+  "id": "auto-1791579620926",
+  "start": 1791580520926,
+  "end": 1791620406834,
+  "source": "auto",
+  "confidence": "medium",
+  "triggers": [
+   "screen"
+  ],
+  "note": "Me acosté a las 23:30"
+ },
+ {
+  "id": "auto-1791677302508",
+  "start": 1791678202508,
+  "end": 1791717298534,
+  "source": "auto",
+  "confidence": "medium",
+  "triggers": [
+   "screen"
+  ]
+ },
+ {
+  "id": "auto-1791740381399",
+  "start": 1791741281399,
+  "end": 1791796365368,
+  "source": "auto",
+  "confidence": "low",
+  "triggers": [
+   "screen"
+  ]
+ },
+ {
+  "id": "auto-1791828481589",
+  "start": 1791829381589,
+  "end": 1791840776536,
+  "source": "auto",
+  "confidence": "low",
+  "triggers": [
+   "screen"
+  ]
+ },
+ {
+  "id": "auto-1791845826394",
+  "start": 1791846726394,
+  "end": 1791883581311,
+  "source": "auto",
+  "confidence": "medium",
+  "triggers": [
+   "screen"
+  ],
+  "note": "Correcto"
+ },
+ {
+  "id": "auto-1791919455185",
+  "start": 1791920355185,
+  "end": 1791969310698,
+  "source": "auto",
+  "confidence": "low",
+  "triggers": [
+   "screen"
+  ],
+  "note": "No dormí nada\nMe acoste a la 1:30"
+ },
+ {
+  "id": "auto-1791996636500",
+  "start": 1791997536500,
+  "end": 1792009069826,
+  "source": "auto",
+  "confidence": "medium",
+  "triggers": [
+   "screen"
+  ],
+  "note": "No he dormido. De hecho, he usado el movil"
+ },
+ {
+  "id": "auto-1792014967736",
+  "start": 1792015867736,
+  "end": 1792055484663,
+  "source": "auto",
+  "confidence": "medium",
+  "triggers": [
+   "screen"
+  ],
+  "note": "Me acoste sobre 00:20"
+ },
+ {
+  "id": "auto-1792103532180",
+  "start": 1792104432180,
+  "end": 1792141658167,
+  "source": "auto",
+  "confidence": "medium",
+  "triggers": [
+   "screen"
+  ],
+  "note": "Correcto"
+ },
+ {
+  "id": "auto-1792194819104",
+  "start": 1792195719104,
+  "end": 1792228269318,
+  "source": "auto",
+  "confidence": "medium",
+  "triggers": [
+   "screen"
+  ],
+  "note": "Correcto"
+ },
+ {
+  "id": "auto-1792263498769",
+  "start": 1792264398769,
+  "end": 1792319822476,
+  "source": "auto",
+  "confidence": "low",
+  "triggers": [
+   "screen"
+  ],
+  "note": "No he dormido\nMe acosté sobre las 00:20"
+ },
+ {
+  "id": "auto-1792347721617",
+  "start": 1792348621617,
+  "end": 1792359413241,
+  "source": "auto",
+  "confidence": "low",
+  "triggers": [
+   "screen"
+  ]
+ },
+ {
+  "id": "auto-1792362981695",
+  "start": 1792363881695,
+  "end": 1792406563710,
+  "source": "auto",
+  "confidence": "medium",
+  "triggers": [
+   "screen"
+  ],
+  "note": "Me levanté sobre las 8:00. A las 6:19 desbloqueé el móvil momentáneamente\nNo he dormido"
+ }
+]

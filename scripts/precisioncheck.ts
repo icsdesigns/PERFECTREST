@@ -91,6 +91,9 @@ console.log('\n--- Precisión: lo que cuenta el comentario ---');
     note: 'Me levanté sobre las 8:00. A las 6:19 desbloqueé el móvil momentáneamente' });
   assert('«me levanté sobre las 8:00» da el final, no el 6:19',
     h.end !== null && clock(h.end) === '08:00', h.end && clock(h.end));
+  const i = p('No he dormido aun en este periodo\nEs correcto');
+  assert('«no he dormido… es correcto» se contradice: no se usa a favor ni en contra',
+    !i.accepted && !i.notSleep && i.start === null);
   assert('una sesión sin comentario no da nada', parseNote(base).start === null && !parseNote(base).accepted);
 }
 
@@ -177,6 +180,16 @@ console.log('\n--- Precisión: una noche principal por día ---');
   assert('la tarde despierto antes de la noche tampoco',
     tardeYnoche.results.length === 1 && clock(tardeYnoche.results[0].session.start) === '22:29');
 
+  const better = evaluateGaps([gap('2026-09-25T23:30:00', '2026-09-26T07:30:00')], MON, {
+    known: [{ start: at('2026-09-25T20:30:00'), end: at('2026-09-25T23:20:00'), rank: 0.35 }],
+  });
+  assert('una propuesta sin revisar de la tarde no tapa la noche de verdad que llega después',
+    better.results.length === 1);
+  const firm = evaluateGaps([gap('2026-09-25T23:30:00', '2026-09-26T07:30:00')], MON, {
+    known: [{ start: at('2026-09-25T20:30:00'), end: at('2026-09-26T07:00:00') }],
+  });
+  assert('pero una noche firme del mismo día sí', firm.results.length === 0);
+
   const withKnown = evaluateGaps([gap('2026-09-26T13:00:00', '2026-09-26T17:30:00')], MON, {
     known: [{ start: at('2026-09-25T23:00:00'), end: at('2026-09-26T07:00:00') }],
   });
@@ -213,12 +226,12 @@ console.log('\n--- Precisión: confianza por evidencias ---');
   const habit = { startMin: 23 * 60 + 30, endMin: 7 * 60 + 30, n: 8 };
   const ideal = evaluateGap(at('2026-09-18T23:30:00'), at('2026-09-19T07:30:00'), MON, ['screen', 'charger'], { habit })!;
   const earlyStart = evaluateGap(at('2026-09-18T20:30:00'), at('2026-09-19T07:30:00'), MON, ['screen'], { habit })!;
-  const strange = evaluateGap(at('2026-09-18T21:40:00'), at('2026-09-19T11:10:00'), MON, ['screen'], { habit })!;
+  const strange = evaluateGap(at('2026-09-18T21:40:00'), at('2026-09-19T12:00:00'), MON, ['screen'], { habit });
   assert('la noche de siempre con dos señales es de confianza alta', ideal.session.confidence === 'high', ideal.score);
   assert('empezar tres horas antes de tu hora de acostarte baja la puntuación',
     (earlyStart.score ?? 1) < (ideal.score ?? 0) && earlyStart.session.confidence !== 'high',
     [earlyStart.score, earlyStart.session.confidence]);
-  assert('y una noche rara de 13h20 ni siquiera se propone', strange === null);
+  assert('y un hueco suelto de 13h30 pasa del techo y no se propone', strange === null);
 
   const moved: SleepSession = { ...earlyStart.session };
   const refined = refineEdges(moved, 15, { habit });
@@ -277,8 +290,14 @@ console.log('\n--- Precisión: micro-despertares ---');
   assert('un hueco de 16h se parte por el micro-despertar que deja una noche creíble',
     afternoonThenNight.results.length === 1 && clock(afternoonThenNight.results[0].session.start) === '23:55',
     afternoonThenNight.results.map((r) => formatDuration(r.gapMs)));
-  assert('y sin micro-despertares sigue descartándose',
-    evaluateGaps([gap('2026-09-21T17:00:00', '2026-09-22T09:00:00')], MON, { habit }).rejected[0]?.reason === 'too-long');
+  const inferred = evaluateGaps([gap('2026-09-21T17:00:00', '2026-09-22T09:00:00')], MON, { habit });
+  assert('y sin micro-despertares la noche empieza a tu hora de acostarte, con confianza baja',
+    inferred.results.length === 1 &&
+      clock(inferred.results[0].session.start) === '23:40' &&
+      inferred.results[0].session.confidence === 'low',
+    inferred.results.map((r) => `${clock(r.session.start)} ${r.session.confidence}`));
+  assert('pero si tu hora de acostarte no cae dentro del hueco no hay noche que deducir',
+    evaluateGaps([gap('2026-09-21T06:00:00', '2026-09-21T21:30:00')], MON, { habit }).rejected[0]?.reason === 'too-long');
 }
 
 // --- Sensores ---------------------------------------------------------------

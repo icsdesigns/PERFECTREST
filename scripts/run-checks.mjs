@@ -19,6 +19,8 @@ const suites = [
   { name: 'dominio', entry: 'scripts/selfcheck.ts' },
   { name: 'noches', entry: 'scripts/nightsim.ts' },
   { name: 'precision', entry: 'scripts/precisioncheck.ts' },
+  // Las horas del historial etiquetado son hora de pared de Madrid.
+  { name: 'backtest', entry: 'scripts/backtest.ts', env: { TZ: 'Europe/Madrid' } },
   { name: 'render', entry: 'scripts/rendercheck.tsx' },
 ];
 
@@ -40,7 +42,10 @@ for (const suite of suites) {
     logLevel: 'error',
   });
 
-  const res = spawnSync(process.execPath, [outfile], { stdio: 'inherit' });
+  const res = spawnSync(process.execPath, [outfile], {
+    stdio: 'inherit',
+    env: { ...process.env, ...suite.env },
+  });
   if (res.status !== 0) failed = true;
 }
 

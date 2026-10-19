@@ -89,6 +89,10 @@ export function parseNote(session: Pick<SleepSession, 'start' | 'end' | 'note' |
   }
   // «No he dormido» junto a una hora de acostarse habla del rato anterior a
   // ella, no de que la noche no existiera.
+  const contradictory = out.accepted && out.notSleep && out.start === null && out.end === null;
   if (out.start !== null || out.end !== null || out.accepted) out.notSleep = false;
+  // «No he dormido… Es correcto» se contradice (¿correcta la sesión, o correcto
+  // que aún no durmió?): sin más datos no se puede usar ni a favor ni en contra.
+  if (contradictory) out.accepted = false;
   return out;
 }

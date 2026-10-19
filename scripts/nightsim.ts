@@ -58,7 +58,9 @@ type Action =
   | 'DND_ON'
   | 'DND_OFF'
   /** El servicio arranca o se rearma: mira en qué estado encuentra el móvil. */
-  | 'SERVICE_START';
+  | 'SERVICE_START'
+  /** La pantalla se apaga con el proceso muerto: el servicio no se entera. */
+  | 'SCREEN_OFF_UNSEEN';
 
 interface Event {
   at: number;
@@ -208,6 +210,13 @@ class ServiceModel {
     if (this.wakeUse >= SUSTAINED_USE_MS) this.finalizeWake(now);
   }
 
+  /** SPEC: SleepMonitorService.abandonWakeUse */
+  private abandonWakeUse(): void {
+    if (this.wakeOn <= 0) return;
+    this.wakeLastOff = this.wakeOn;
+    this.wakeOn = 0;
+  }
+
   /** SPEC: SleepMonitorService.checkSustainedUse (el temporizador, antes del evento siguiente) */
   private advance(at: number): void {
     if (this.wakeOn <= 0 || !this.device.interactive || this.device.keyguardLocked) return;
@@ -274,6 +283,12 @@ class ServiceModel {
   /** SPEC: SleepMonitorService.handleEvent */
   handle({ at, action }: Event): void {
     const dev = this.device;
+    if (action === 'SCREEN_OFF_UNSEEN') {
+      // Con el proceso muerto no hay difusión ni temporizador que salte.
+      dev.interactive = false;
+      dev.keyguardLocked = dev.keyguardSecure;
+      return;
+    }
     // El temporizador de uso sostenido salta entre un evento y el siguiente.
     this.advance(at);
     switch (action) {
@@ -344,7 +359,7 @@ class ServiceModel {
         // SPEC: SleepMonitorService.primeScreenState + healStuckGap
         this.healStuckGap(at);
         if (!dev.interactive) {
-          this.screenWentOff(at);
+          this.abandonWakeUse();
           this.open('screen', at, false);
         } else if (dev.keyguardLocked) this.watchingForUnlock = true;
         if (dev.idle) this.open('idle', at, false);
@@ -572,6 +587,26 @@ const NIGHTS: Night[] = [
       ev('2026-09-19T07:12:00', 'SCREEN_ON'),
       ev('2026-09-19T07:12:03', 'USER_PRESENT'),
       ev('2026-09-19T07:12:30', 'SCREEN_OFF'),
+    ],
+  },
+  {
+    // Mira la hora a las tres y, con la pantalla aún encendida, Android mata el
+    // proceso: el SCREEN_OFF se pierde. Al rearmarse con la pantalla apagada no
+    // se sabe cuánto duró ese uso, y contarlo entero hasta el rearme lo daba
+    // por sostenido y partía la noche a las 03:00.
+    name: 'el proceso muere durante un vistazo de madrugada',
+    triggers: ['screen'],
+    device: { keyguardSecure: true, interactive: false },
+    truth: { start: '2026-09-18T23:30:00', end: '2026-09-19T07:30:00' },
+    summaries: 1,
+    events: [
+      ev('2026-09-18T23:30:00', 'SCREEN_OFF'),
+      ev('2026-09-19T03:00:00', 'SCREEN_ON'),
+      ev('2026-09-19T03:00:05', 'USER_PRESENT'),
+      ev('2026-09-19T03:00:40', 'SCREEN_OFF_UNSEEN'),
+      ev('2026-09-19T03:20:00', 'SERVICE_START'),
+      ev('2026-09-19T07:30:00', 'SCREEN_ON'),
+      ev('2026-09-19T07:30:05', 'USER_PRESENT'),
     ],
   },
   {

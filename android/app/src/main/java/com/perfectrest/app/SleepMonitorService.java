@@ -833,6 +833,28 @@ public class SleepMonitorService extends Service {
         }
     }
 
+    /**
+     * El proceso murió con un uso de madrugada en marcha y vuelve con la
+     * pantalla apagada: el SCREEN_OFF se perdió y no se sabe cuándo llegó. Contar
+     * todo el rato hasta ahora como uso daría por sostenido un vistazo de
+     * segundos y partiría la noche en ese desbloqueo, así que se da por apagada
+     * en el mismo instante en que se encendió: queda como micro-despertar, y si
+     * en realidad fue el despertar, el desbloqueo siguiente cierra la noche y la
+     * capa web retrocede el final hasta él (ver `trimGap`).
+     */
+    private void abandonWakeUse() {
+        SharedPreferences p = prefs();
+        long onSince = p.getLong(KEY_WAKE_ON, 0L);
+        if (onSince <= 0) return;
+        p.edit()
+            .putLong(KEY_WAKE_ON, 0L)
+            .putLong(KEY_WAKE_LAST_OFF, onSince)
+            .apply();
+        wakeWatch.removeCallbacksAndMessages(null);
+        logEvent(this, TRIGGER_SCREEN, "discard",
+            "el servicio se reinició con un uso de madrugada a medias: se toma por micro-despertar");
+    }
+
     /** Comprobación diferida: el móvil sigue en uso y ya se ha sostenido lo bastante. */
     private void checkSustainedUse() {
         SharedPreferences p = prefs();
@@ -1019,7 +1041,7 @@ public class SleepMonitorService extends Service {
 
         if (triggerOn(TRIGGER_SCREEN) && power != null && !interactive()) {
             // Si el proceso murió con la pantalla en uso, el SCREEN_OFF se perdió.
-            screenWentOff(now);
+            abandonWakeUse();
             openGap(TRIGGER_SCREEN, now, false);
         } else if (triggerOn(TRIGGER_SCREEN) && keyguardLocked()) {
             // Pantalla encendida y cerrojo puesto al arrancar: el usuario aún

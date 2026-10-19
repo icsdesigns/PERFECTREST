@@ -12,6 +12,7 @@ const WIDTH = Number(process.argv[3] ?? 390);
 const OUT = 'screenshots';
 
 const executablePath = [
+  '/opt/pw-browsers/chromium',
   'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
   'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
 ].find((p) => existsSync(p));

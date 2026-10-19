@@ -14,6 +14,7 @@ import { existsSync } from 'node:fs';
 const URL = process.argv[2] ?? 'http://127.0.0.1:5178/';
 
 const CHROME_CANDIDATES = [
+  '/opt/pw-browsers/chromium',
   'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
   'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
 ];

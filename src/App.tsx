@@ -18,11 +18,38 @@ import './App.css';
 
 type Tab = 'home' | 'goals' | 'cycles' | 'stats' | 'settings';
 
-const TABS: { id: Tab; icon: string; label: string }[] = [
-  { id: 'home', icon: '🌙', label: 'Inicio' },
-  { id: 'goals', icon: '🎯', label: 'Metas' },
-  { id: 'cycles', icon: '🌀', label: 'Ciclos' },
-  { id: 'stats', icon: '📊', label: 'Datos' },
+/** Iconos de trazo: heredan el color de la pestaña y se ven nítidos a cualquier tamaño. */
+const ICON_PATHS: Record<Tab, string> = {
+  home: 'M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5Z',
+  goals: 'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18Zm0 5a4 4 0 1 0 0 8 4 4 0 0 0 0-8Zm0 3.2a.8.8 0 1 0 0 1.6.8.8 0 0 0 0-1.6Z',
+  cycles: 'M20 12a8 8 0 1 1-2.6-5.9M20 4v5h-5',
+  stats: 'M5 20V11M12 20V4M19 20v-6',
+  settings:
+    'M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Zm7.4-2a1.6 1.6 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.6 1.6 0 0 0-1.8-.3 1.6 1.6 0 0 0-1 1.5V19a2 2 0 1 1-4 0v-.1a1.6 1.6 0 0 0-1-1.5 1.6 1.6 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.6 1.6 0 0 0 .3-1.8 1.6 1.6 0 0 0-1.5-1H5a2 2 0 1 1 0-4h.1a1.6 1.6 0 0 0 1.5-1 1.6 1.6 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.6 1.6 0 0 0 1.8.3h0a1.6 1.6 0 0 0 1-1.5V5a2 2 0 1 1 4 0v.1a1.6 1.6 0 0 0 1 1.5h0a1.6 1.6 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.6 1.6 0 0 0-.3 1.8v0a1.6 1.6 0 0 0 1.5 1H19a2 2 0 1 1 0 4h-.1a1.6 1.6 0 0 0-1.5 1Z',
+};
+
+function Icon({ name }: { name: Tab }) {
+  return (
+    <svg
+      className="icon"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d={ICON_PATHS[name]} />
+    </svg>
+  );
+}
+
+const TABS: { id: Tab; label: string }[] = [
+  { id: 'home', label: 'Inicio' },
+  { id: 'goals', label: 'Metas' },
+  { id: 'cycles', label: 'Ciclos' },
+  { id: 'stats', label: 'Datos' },
 ];
 
 const TITLES: Record<Tab, { title: string; sub: string }> = {
@@ -70,7 +97,7 @@ export default function App() {
             aria-label="Ajustes"
             onClick={() => setTab(tab === 'settings' ? 'home' : 'settings')}
           >
-            ⚙️
+            <Icon name="settings" />
           </button>
         </div>
       </header>
@@ -109,7 +136,7 @@ export default function App() {
             onClick={() => setTab(t.id)}
           >
             <span className="tab__icon" aria-hidden="true">
-              {t.icon}
+              <Icon name={t.id} />
               {t.id === 'stats' && pending && <span className="tab__dot" />}
             </span>
             {t.label}

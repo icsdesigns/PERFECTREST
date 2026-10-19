@@ -6,7 +6,7 @@
   display: flex;
   flex-direction: column;
   min-height: 100%;
-  max-width: 520px;
+  max-width: 640px;
   margin: 0 auto;
   /* Zonas seguras del móvil (notch y barra de gestos). */
   padding: var(--safe-top) var(--safe-right) 0 var(--safe-left);
@@ -52,19 +52,22 @@
 
 .appbar__actions { display: flex; gap: var(--sp-2); }
 
+.icon { width: 1.4em; height: 1.4em; display: block; }
+
 .iconbtn {
   flex: 0 0 auto;
-  width: 38px;
-  height: 38px;
+  width: 44px;
+  height: 44px;
   border-radius: var(--r-sm);
   display: grid;
   place-items: center;
   color: var(--text-muted);
   background: var(--surface);
   border: 1px solid var(--border-soft);
-  transition: color 0.15s var(--ease), background 0.15s var(--ease);
+  transition: color 0.15s var(--ease), background 0.15s var(--ease), transform 0.12s var(--ease);
 }
 
+.iconbtn:active { transform: scale(0.94); }
 .iconbtn:hover { color: var(--text); background: var(--surface-hover); }
 .iconbtn[aria-pressed='true'] { color: var(--primary-soft); border-color: var(--primary); }
 
@@ -90,7 +93,7 @@
   right: 0;
   z-index: 20;
   display: flex;
-  max-width: 520px;
+  max-width: 640px;
   margin: 0 auto;
   padding: var(--sp-2) var(--sp-3) calc(var(--sp-2) + var(--safe-bottom));
   background: color-mix(in srgb, var(--bg-elevated) 88%, transparent);
@@ -108,14 +111,17 @@
   flex-direction: column;
   align-items: center;
   gap: var(--sp-1);
+  justify-content: center;
+  min-height: 52px;
   padding: var(--sp-2) var(--sp-1);
-  border-radius: var(--r-sm);
+  border-radius: var(--r);
   color: var(--text-faint);
   font-size: 0.66rem;
   font-weight: 650;
-  transition: color 0.18s var(--ease);
+  transition: color 0.18s var(--ease), background 0.18s var(--ease);
 }
 
+.tab:active { background: var(--surface-2); }
 .tab[aria-current='page'] { color: var(--primary-soft); }
 :root[data-theme='light'] .tab[aria-current='page'] { color: var(--primary); }
 
@@ -127,6 +133,18 @@
   font-size: 1.16rem;
   line-height: 1;
   padding: 0 var(--sp-2);
+  transition: transform 0.2s var(--ease);
+}
+
+.tab[aria-current='page'] .tab__icon { transform: translateY(-1px) scale(1.08); }
+.tab[aria-current='page']::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  width: 24px;
+  height: 3px;
+  border-radius: var(--r-full);
+  background: var(--primary-soft);
 }
 
 /* Indicador de sesión pendiente, anclado al icono. */
@@ -232,7 +250,7 @@
 
 .daypicker__day {
   flex: 1;
-  aspect-ratio: 1;
+  min-height: 44px;
   border-radius: var(--r-sm);
   background: var(--surface-2);
   border: 1.5px solid transparent;
@@ -319,7 +337,7 @@
   padding: calc(var(--sp-8) + var(--safe-top)) calc(var(--sp-6) + var(--safe-right))
     calc(var(--sp-8) + var(--safe-bottom)) calc(var(--sp-6) + var(--safe-left));
   background: var(--bg);
-  max-width: 520px;
+  max-width: 640px;
   margin: 0 auto;
   overflow-y: auto;
 }
@@ -351,7 +369,7 @@
 
 .sheet__panel {
   width: 100%;
-  max-width: 520px;
+  max-width: 640px;
   background: var(--bg-elevated);
   border-radius: var(--r-lg) var(--r-lg) 0 0;
   border-top: 1px solid var(--border);
@@ -359,6 +377,8 @@
   box-shadow: var(--shadow-lg);
   animation: slideUp 0.26s var(--ease);
   max-height: 88vh;
+  max-height: 88dvh;
+  overscroll-behavior: contain;
   overflow-y: auto;
 }
 
@@ -378,6 +398,7 @@
 
 .quality__btn {
   flex: 1;
+  min-height: 48px;
   padding: var(--sp-3) 0;
   border-radius: var(--r-sm);
   background: var(--surface-2);

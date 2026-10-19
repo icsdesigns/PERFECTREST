@@ -64,6 +64,8 @@ export interface DetectionResult {
   score?: number;
   /** Lo que dijeron los sensores de este hueco, si había alguno activo. */
   evidence?: GapEvidence;
+  /** El inicio se dedujo de tu hábito, no se midió: nunca pasa de confianza baja. */
+  inferred?: boolean;
 }
 
 /**
@@ -287,6 +289,7 @@ function assessGap(
       gapMs,
       score,
       evidence: ev ?? undefined,
+      ...(ctx.inferred ? { inferred: true } : {}),
       session: {
         id: `auto-${lastActive}`,
         start,
@@ -469,6 +472,8 @@ function fuseCluster(
     habit,
     evidence: evidence && { ...evidence, activityAt: null, wakeAt: null },
     detected: { start: detectedStart, end: detectedEnd },
+    // Un inicio deducido del hábito sigue siéndolo aunque otra señal coincida.
+    inferred: lead.some((r) => r.inferred),
   });
   // Se devuelve la evidencia completa: dice si el inicio lo fijó un sensor.
   if ('result' in fused) return { ...fused.result, evidence: evidence ?? undefined };

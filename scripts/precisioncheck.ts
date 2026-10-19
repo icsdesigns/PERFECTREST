@@ -337,6 +337,18 @@ console.log('\n--- Precisión: micro-despertares ---');
       clock(inferred.results[0].session.start) === '23:40' &&
       inferred.results[0].session.confidence === 'low',
     inferred.results.map((r) => `${clock(r.session.start)} ${r.session.confidence}`));
+  // Que el cargador coincida no convierte en medido un inicio deducido.
+  const inferredPlusCharger = evaluateGaps(
+    [
+      gap('2026-09-21T17:00:00', '2026-09-22T09:00:00'),
+      gap('2026-09-21T23:50:00', '2026-09-22T08:50:00', { startTrigger: 'charger', endTrigger: 'charger' }),
+    ],
+    { ...MON, triggers: { ...DEFAULT_TRIGGERS, charger: true } },
+    { habit },
+  );
+  assert('un inicio deducido sigue en confianza baja aunque otra señal coincida',
+    inferredPlusCharger.results.length === 1 && inferredPlusCharger.results[0].session.confidence === 'low',
+    inferredPlusCharger.results.map((r) => `${clock(r.session.start)} ${r.session.confidence}`));
   assert('pero si tu hora de acostarte no cae dentro del hueco no hay noche que deducir',
     evaluateGaps([gap('2026-09-21T06:00:00', '2026-09-21T21:30:00')], MON, { habit }).rejected[0]?.reason === 'too-long');
 }

@@ -142,7 +142,11 @@ export function PhaseLegend() {
  * El eje Y siempre arranca en 0 para que la comparación de alturas sea honesta.
  */
 export function DurationChart({ nights }: { nights: NightRecord[] }) {
-  const w = Math.max(300, nights.length * 44);
+  const padL = 26;
+  // Hasta dos semanas la gráfica se ajusta al ancho disponible; con más noches
+  // mantiene un ancho por barra y se desplaza.
+  const wide = nights.length > 14;
+  const w = wide ? nights.length * 30 + padL : 300;
   const h = 168;
   const padB = 22;
   const padT = 8;
@@ -151,23 +155,24 @@ export function DurationChart({ nights }: { nights: NightRecord[] }) {
   const maxDur = Math.max(...nights.map((n) => n.durationMs), 0);
   const maxMs = Math.max(maxTarget, maxDur, 8 * HOUR) * 1.1;
   const y = (ms: number) => padT + (1 - ms / maxMs) * (h - padT - padB);
-  const bw = Math.min(26, (w / nights.length) * 0.6);
+  const plotW = w - padL;
+  const bw = Math.min(26, (plotW / nights.length) * 0.6);
 
   return (
     <div className="chart-scroll">
-      <svg className="chart" viewBox={`0 0 ${w} ${h}`} style={{ minWidth: w }} role="img"
+      <svg className="chart" viewBox={`0 0 ${w} ${h}`} style={wide ? { minWidth: w } : undefined} role="img"
         aria-label="Duración del sueño por noche">
         {[2, 4, 6, 8, 10].map((hrs) =>
           hrs * HOUR <= maxMs ? (
             <g key={hrs}>
-              <line x1={0} x2={w} y1={y(hrs * HOUR)} y2={y(hrs * HOUR)} className="chart__grid" />
-              <text x={2} y={y(hrs * HOUR) - 3} className="chart__axis">{hrs}h</text>
+              <line x1={padL} x2={w} y1={y(hrs * HOUR)} y2={y(hrs * HOUR)} className="chart__grid" />
+              <text x={0} y={y(hrs * HOUR) + 3} className="chart__axis">{hrs}h</text>
             </g>
           ) : null,
         )}
 
         {nights.map((n, i) => {
-          const cx = ((i + 0.5) / nights.length) * w;
+          const cx = padL + ((i + 0.5) / nights.length) * plotW;
           const hit = n.durationMs + 30 * 60_000 >= n.targetMs;
           const color = !n.session ? 'var(--surface-2)' : hit ? 'var(--mint)' : 'var(--primary)';
           const top = n.session ? y(n.durationMs) : y(0) - 3;

@@ -21,7 +21,7 @@
 }
 
 .card__title {
-  font-size: 0.94rem;
+  font-size: 1rem;
   font-weight: 650;
   letter-spacing: -0.01em;
 }
@@ -56,6 +56,7 @@
      el control más allá de la pantalla en móviles estrechos. */
   flex: 1 1 0;
   min-width: 0;
+  min-height: 44px;
   padding: var(--sp-2) var(--sp-1);
   border-radius: 13px;
   font-size: 0.8rem;
@@ -86,6 +87,7 @@
   justify-content: space-between;
   gap: var(--sp-4);
   width: 100%;
+  min-height: 44px;
   padding: var(--sp-3) 0;
   text-align: left;
 }
@@ -136,8 +138,8 @@
 }
 
 .stepper__btn {
-  width: 34px;
-  height: 34px;
+  width: 44px;
+  height: 44px;
   border-radius: var(--r-sm);
   background: var(--surface-2);
   border: 1px solid var(--border-soft);
@@ -153,7 +155,7 @@
 .stepper__btn:disabled { opacity: 0.35; cursor: not-allowed; }
 
 .stepper__value {
-  min-width: 68px;
+  min-width: 64px;
   text-align: center;
   font-size: 0.95rem;
   font-weight: 650;
@@ -166,6 +168,7 @@
   background: var(--surface-2);
   border: 1px solid var(--border);
   border-radius: var(--r-sm);
+  min-height: 44px;
   padding: var(--sp-2) var(--sp-3);
   /* Dos campos de hora deben caber juntos en una fila de 320px. */
   min-width: 0;
@@ -186,6 +189,7 @@
   background: var(--surface-2);
   border: 1px solid var(--border);
   border-radius: var(--r-sm);
+  min-height: 44px;
   padding: var(--sp-2) var(--sp-3);
   min-width: 0;
   max-width: 100%;
@@ -226,6 +230,7 @@
   align-items: center;
   justify-content: center;
   gap: var(--sp-2);
+  min-height: 44px;
   padding: var(--sp-3) var(--sp-4);
   border-radius: var(--r);
   font-size: 0.86rem;
@@ -234,6 +239,7 @@
 }
 
 .btn:active { transform: scale(0.975); }
+.btn:disabled { opacity: 0.55; cursor: not-allowed; }
 
 .btn--primary {
   background: var(--primary);

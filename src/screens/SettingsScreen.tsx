@@ -14,11 +14,15 @@ import {
   openAppSettings,
   openNotificationSettings,
   readNativeEvents,
+  readRawEvents,
+  readSensorStatus,
   requestBatteryExemption,
   requestExactAlarms,
+  requestSensorPermission,
   simulateGap,
   type MonitorStatus,
 } from '../lib/backgroundMonitor';
+import { NO_SENSORS, SENSORS, sensorEnabled, type SensorStatus } from '../lib/sensors';
 import {
   clearLog,
   describeEvent,
@@ -28,12 +32,12 @@ import {
 } from '../lib/triggerLog';
 import { TRIGGERS, TRIGGER_SHORT, triggerEnabled } from '../lib/triggers';
 import { HOUR, formatDuration, relativeDayLabel } from '../lib/time';
-import { exportSessions, type ExportFormat } from '../lib/exportSessions';
+import { exportRawEvents, exportSessions, type ExportFormat } from '../lib/exportSessions';
 import { useStore } from '../state/store';
 import { useAppUpdate } from '../state/update';
 import { UpdateBanner } from '../components/UpdateBanner';
 import { APP_VERSION } from '../lib/updater';
-import type { TriggerEvent, TriggerId } from '../lib/types';
+import type { SensorId, TriggerEvent, TriggerId } from '../lib/types';
 
 export function SettingsScreen() {
   const { state, patch, dispatch } = useStore();
@@ -53,7 +57,17 @@ export function SettingsScreen() {
     lastGapAt: 0,
     lastError: null,
   });
+  const [sensorStatus, setSensorStatus] = useState<SensorStatus>(NO_SENSORS);
   const backgroundReady = isBackgroundAvailable();
+
+  const doExportRaw = (format: ExportFormat) => {
+    setExportError(false);
+    void readRawEvents()
+      .then((events) => exportRawEvents(events, format))
+      .catch((e) => {
+        if (!/cancel/i.test(String(e?.message ?? e))) setExportError(true);
+      });
+  };
 
   const doExport = (format: ExportFormat) => {
     setExportError(false);
@@ -65,8 +79,15 @@ export function SettingsScreen() {
 
   const refresh = () => {
     void currentPermission().then(setPermission);
-    if (backgroundReady) void backgroundStatus().then(setService);
+    if (backgroundReady) {
+      void backgroundStatus().then(setService);
+      void readSensorStatus().then(setSensorStatus);
+    }
   };
+
+  useEffect(() => {
+    if (backgroundReady) void readSensorStatus().then(setSensorStatus);
+  }, [backgroundReady]);
 
   useEffect(() => {
     void currentPermission().then(setPermission);
@@ -94,6 +115,15 @@ export function SettingsScreen() {
 
   const setTrigger = (id: TriggerId, on: boolean) =>
     patch({ monitor: { ...monitor, triggers: { ...monitor.triggers, [id]: on } } });
+
+  const setSensor = (id: SensorId, on: boolean) => {
+    patch({ monitor: { ...monitor, sensors: { ...monitor.sensors, [id]: on } } });
+    // El contador de pasos pide «Actividad física»: se pide al activarlo, y si
+    // se deniega sigue funcionando con el movimiento significativo.
+    if (on && id === 'steps' && sensorStatus.steps.needsPermission) {
+      void requestSensorPermission().then(() => readSensorStatus().then(setSensorStatus));
+    }
+  };
 
   // El uso del dispositivo lo aporta el servicio nativo; el latido de la app
   // es el respaldo cuando no lo hay. Son medidas distintas y se etiquetan
@@ -287,6 +317,60 @@ export function SettingsScreen() {
         </Card>
       )}
 
+      {monitor.enabled && (
+        <Card
+          title="Sensores opcionales"
+          sub="Afinan cuándo empezaste a dormir y cuándo te despertaste: el último uso del móvil suele ser una o dos horas anterior a dormirte. Están apagados por defecto, consumen muy poca batería y ninguno usa el micrófono."
+        >
+          {SENSORS.map((sensor) => {
+            const status = sensorStatus[sensor.id];
+            const available = backgroundReady && status.available;
+            const on = sensorEnabled(monitor, sensor.id);
+            let note: string | null = null;
+            if (!backgroundReady) note = 'Requiere la app instalada.';
+            else if (!status.available) note = 'Tu móvil no tiene este sensor.';
+            else if (sensor.id === 'steps' && on && status.needsPermission)
+              note =
+                'Sin el permiso «Actividad física» sólo se usa el movimiento significativo, que detecta menos.';
+            else if (sensor.id === 'steps' && on && status.mode === 'motion')
+              note = 'Tu móvil no tiene contador de pasos: se usa el movimiento significativo.';
+            return (
+              <div key={sensor.id} style={{ opacity: available ? 1 : 0.55 }}>
+                <Toggle
+                  checked={available && on}
+                  onChange={(v) => available && setSensor(sensor.id, v)}
+                  label={sensor.label}
+                  hint={note ? `${sensor.hint} ${note}` : sensor.hint}
+                />
+                {sensor.id === 'steps' && available && on && status.needsPermission && (
+                  <div className="pending__actions">
+                    <button
+                      className="btn btn--ghost"
+                      onClick={() =>
+                        void requestSensorPermission().then(async (granted) => {
+                          // Denegado para siempre, Android ya no muestra el diálogo.
+                          if (granted) setSensorStatus(await readSensorStatus());
+                          else await openAppSettings();
+                        })
+                      }
+                    >
+                      Conceder «Actividad física»
+                    </button>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+
+          {backgroundReady && !monitor.background && (
+            <p style={{ fontSize: '0.76rem', color: 'var(--amber)', lineHeight: 1.55 }}>
+              Los sensores los registra el servicio en segundo plano: con «seguir detectando con
+              la app cerrada» apagado no recogen nada.
+            </p>
+          )}
+        </Card>
+      )}
+
       {monitor.enabled && <TriggerLogCard backgroundReady={backgroundReady} />}
 
       <UpdateCard />
@@ -314,6 +398,22 @@ export function SettingsScreen() {
             Exportar JSON
           </button>
         </div>
+        {backgroundReady && (
+          <>
+            <p style={{ fontSize: '0.76rem', color: 'var(--text-muted)', marginTop: 'var(--sp-3)', lineHeight: 1.55 }}>
+              El registro bruto es cada evento que vio el servicio —pantalla, cargador y
+              sensores— con su hora. Sirve para revisar por qué una noche salió como salió.
+            </p>
+            <div className="pending__actions" style={{ marginTop: 'var(--sp-2)' }}>
+              <button className="btn btn--ghost" onClick={() => doExportRaw('csv')}>
+                Registro bruto CSV
+              </button>
+              <button className="btn btn--ghost" onClick={() => doExportRaw('json')}>
+                Registro bruto JSON
+              </button>
+            </div>
+          </>
+        )}
         {exportError && (
           <p style={{ fontSize: '0.76rem', color: 'var(--amber)', marginTop: 'var(--sp-2)' }}>
             No se pudo exportar. Inténtalo de nuevo.

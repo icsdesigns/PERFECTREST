@@ -1,6 +1,7 @@
 import { Capacitor } from '@capacitor/core';
 import { Directory, Filesystem, Encoding } from '@capacitor/filesystem';
 import { Share } from '@capacitor/share';
+import type { RawEvent } from './rawEvents';
 import type { SleepSession } from './types';
 
 export type ExportFormat = 'csv' | 'json';
@@ -55,15 +56,41 @@ export function sessionsToJson(sessions: SleepSession[]): string {
   return JSON.stringify(sorted, null, 2);
 }
 
+/** Una fila por evento, de más antiguo a más reciente: instante local, instante en ms, tipo y valor. */
+const RAW_HEADER = ['fecha', 'hora', 'instante_ms', 'tipo', 'valor'];
+
+export function rawEventsToCsv(events: RawEvent[]): string {
+  const rows = [...events]
+    .sort((a, b) => a.at - b.at)
+    .map((e) =>
+      [
+        localDate(e.at),
+        `${localTime(e.at)}:${pad(new Date(e.at).getSeconds())}`,
+        e.at,
+        e.kind,
+        e.v,
+      ]
+        .map(csvField)
+        .join(','),
+    );
+  return '\ufeff' + [RAW_HEADER.join(','), ...rows].join('\r\n') + '\r\n';
+}
+
+export function rawEventsToJson(events: RawEvent[]): string {
+  return JSON.stringify([...events].sort((a, b) => a.at - b.at), null, 2);
+}
+
 /**
- * Entrega el archivo al usuario. En Android el WebView no descarga blobs, así
+ * Entrega un archivo al usuario. En Android el WebView no descarga blobs, así
  * que se escribe en caché y se abre la hoja de compartir; en el navegador es
  * una descarga normal.
  */
-export async function exportSessions(sessions: SleepSession[], format: ExportFormat): Promise<void> {
-  const content = format === 'csv' ? sessionsToCsv(sessions) : sessionsToJson(sessions);
-  const name = `perfectrest-sueno-${localDate(Date.now())}.${format}`;
-
+async function deliver(
+  name: string,
+  content: string,
+  format: ExportFormat,
+  title: string,
+): Promise<void> {
   if (Capacitor.isNativePlatform()) {
     const { uri } = await Filesystem.writeFile({
       path: name,
@@ -71,7 +98,7 @@ export async function exportSessions(sessions: SleepSession[], format: ExportFor
       directory: Directory.Cache,
       encoding: Encoding.UTF8,
     });
-    await Share.share({ title: 'Registros de sueño', files: [uri], dialogTitle: 'Exportar registros' });
+    await Share.share({ title, files: [uri], dialogTitle: title });
     return;
   }
 
@@ -84,4 +111,24 @@ export async function exportSessions(sessions: SleepSession[], format: ExportFor
   a.click();
   a.remove();
   URL.revokeObjectURL(url);
+}
+
+export async function exportSessions(sessions: SleepSession[], format: ExportFormat): Promise<void> {
+  const content = format === 'csv' ? sessionsToCsv(sessions) : sessionsToJson(sessions);
+  await deliver(`perfectrest-sueno-${localDate(Date.now())}.${format}`, content, format, 'Registros de sueño');
+}
+
+/**
+ * Exporta el registro bruto del servicio (pantalla, cargador y sensores) junto
+ * al historial. Sirve para afinar los umbrales con noches reales: sin ver los
+ * eventos que produjeron una detección no hay forma de saber por qué falló.
+ */
+export async function exportRawEvents(events: RawEvent[], format: ExportFormat): Promise<void> {
+  const content = format === 'csv' ? rawEventsToCsv(events) : rawEventsToJson(events);
+  await deliver(
+    `perfectrest-registro-bruto-${localDate(Date.now())}.${format}`,
+    content,
+    format,
+    'Registro bruto de eventos',
+  );
 }

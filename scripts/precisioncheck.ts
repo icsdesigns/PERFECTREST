@@ -23,6 +23,7 @@ import { LIGHT_BRIGHT, LIGHT_DARK, gatherEvidence, type RawEvent } from '../src/
 import { DEFAULT_SENSORS, activeSensors } from '../src/lib/sensors';
 import { DEFAULT_GOALS } from '../src/lib/schedule';
 import { DEFAULT_TRIGGERS } from '../src/lib/triggers';
+import { rawEventsToCsv, rawEventsToJson } from '../src/lib/exportSessions';
 import { HOUR, MINUTE, formatDuration } from '../src/lib/time';
 import type { MonitorSettings, ScheduleSettings, SleepSession } from '../src/lib/types';
 
@@ -390,6 +391,24 @@ console.log('\n--- Precisión: sensores ---');
   assert('una siesta a oscuras y quieta se acepta como siesta',
     two.results.length === 2 && !!two.results[1].session.nap,
     two.results.map((x) => `${clock(x.session.start)} ${x.session.nap}`));
+}
+
+// --- Exportación del registro bruto -----------------------------------------
+
+console.log('\n--- Precisión: exportación del registro bruto ---');
+{
+  const events: RawEvent[] = [
+    { at: at('2026-09-22T07:35:10'), kind: 'steps', v: 40 },
+    { at: at('2026-09-21T23:00:00'), kind: 'screen-off' },
+  ];
+  const csv = rawEventsToCsv(events).replace('\ufeff', '').split('\r\n');
+  assert('el CSV lleva cabecera y una fila por evento, ordenadas por hora',
+    csv[0] === 'fecha,hora,instante_ms,tipo,valor' && csv[1].includes('screen-off') && csv[2].includes('steps,40'),
+    csv);
+  assert('la hora local lleva segundos', csv[2].startsWith('2026-09-22,07:35:10,'), csv[2]);
+  const json = JSON.parse(rawEventsToJson(events)) as RawEvent[];
+  assert('el JSON conserva los eventos tal cual y ordenados',
+    json.length === 2 && json[0].kind === 'screen-off' && json[1].v === 40);
 }
 
 console.log(failures ? `\n${failures} comprobación(es) fallidas` : '\nTodo correcto');

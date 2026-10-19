@@ -17,7 +17,7 @@ import {
   refineEdges,
 } from '../src/lib/activityMonitor';
 import type { NativeGap } from '../src/lib/backgroundMonitor';
-import { learnHabit, learnLatency, circularMean, minuteDiff } from '../src/lib/habit';
+import { learnHabit, learnLatency, circularMean, circularSpread, minuteDiff } from '../src/lib/habit';
 import { parseNote } from '../src/lib/noteTimes';
 import { LIGHT_BRIGHT, LIGHT_DARK, gatherEvidence, type RawEvent } from '../src/lib/rawEvents';
 import { DEFAULT_SENSORS, activeSensors } from '../src/lib/sensors';
@@ -274,6 +274,16 @@ console.log('\n--- Precisión: confianza por evidencias ---');
     refineEdges(ideal.session, 15, { habit }).start === ideal.session.start + 15 * MINUTE);
   assert('la latencia personal sustituye a la de ajustes',
     refineEdges(ideal.session, 15, { learnedLatencyMinutes: 25 }).start === ideal.session.start + 25 * MINUTE);
+  // Quien varía mucho de hora no se lleva hasta su media: el margen es lo que
+  // suele variar (aquí 50 min), y una noche en que se acostó pronto de verdad
+  // queda más cerca de lo medido.
+  assert('con un hábito muy variable, el inicio se adelanta menos',
+    clock(refineEdges(moved, 15, { habit: { ...habit, spreadMin: 50 } }).start) === '22:40',
+    clock(refineEdges(moved, 15, { habit: { ...habit, spreadMin: 50 } }).start));
+  assert('y el margen nunca pasa de una hora',
+    clock(refineEdges(moved, 15, { habit: { ...habit, spreadMin: 300 } }).start) === '22:30');
+  assert('la dispersión circular de 23:40 y 00:20 es de unos 20 min',
+    Math.abs(circularSpread([23 * 60 + 40, 20]) - 20) < 1, circularSpread([23 * 60 + 40, 20]));
   assert('el hábito no acerca el inicio si deja una noche de menos de 3h',
     refineEdges({ ...moved, end: moved.start + 4 * HOUR }, 15, { habit }).start === moved.start + 15 * MINUTE);
 }

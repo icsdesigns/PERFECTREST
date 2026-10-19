@@ -17,6 +17,11 @@ export interface SleepHabit {
   endMin: number;
   /** Cuántas noches respaldan estos números; 0 si salen del horario. */
   n: number;
+  /**
+   * Cuánto varía tu hora de acostarte de una noche a otra (desviación típica
+   * circular, en minutos). Sólo con hábito aprendido.
+   */
+  spreadMin?: number;
 }
 
 /** Noches mínimas para fiarse del hábito aprendido en vez del horario. */
@@ -45,6 +50,21 @@ export function circularMean(minutes: number[]): number {
   }
   const angle = Math.atan2(y, x);
   return (((angle / (2 * Math.PI)) * 1440) % 1440 + 1440) % 1440;
+}
+
+/** Desviación típica circular de horas del día, en minutos (0 si todas coinciden). */
+export function circularSpread(minutes: number[]): number {
+  if (!minutes.length) return 0;
+  let x = 0;
+  let y = 0;
+  for (const m of minutes) {
+    const a = (m / 1440) * 2 * Math.PI;
+    x += Math.cos(a);
+    y += Math.sin(a);
+  }
+  const r = Math.min(1, Math.hypot(x, y) / minutes.length);
+  if (r <= 0) return 720;
+  return (Math.sqrt(-2 * Math.log(r)) * 1440) / (2 * Math.PI);
 }
 
 /** Diferencia con signo entre dos horas del día, en minutos, en (-720, 720]. */
@@ -101,7 +121,12 @@ export function learnHabit(
   }
 
   if (starts.length >= MIN_HABIT_NIGHTS) {
-    return { startMin: circularMean(starts), endMin: circularMean(ends), n: starts.length };
+    return {
+      startMin: circularMean(starts),
+      endMin: circularMean(ends),
+      n: starts.length,
+      spreadMin: circularSpread(starts),
+    };
   }
 
   // Sin historial: lo que dice el horario para mañana (hora de despertar menos horas objetivo).

@@ -493,8 +493,21 @@ export interface RefineOptions {
   habit?: SleepHabit | null;
 }
 
-/** Cuánto antes de la hora habitual puede caer el inicio sin que se corrija. */
-const HABIT_START_SLACK_MS = 20 * MINUTE;
+/**
+ * Cuánto antes de tu hora habitual puede caer el inicio sin que se corrija, y
+ * hasta dónde se adelanta cuando se corrige: tu hora habitual menos lo que
+ * suele variar de una noche a otra. Quien se acuesta siempre a la misma hora
+ * queda a 20 min de ella; quien varía mucho, hasta una hora antes. Así una
+ * noche en que te acostaste pronto de verdad no se lleva hasta la media,
+ * que es lo que pasaba con un margen fijo (23:30 real quedaba en 00:38).
+ */
+const HABIT_START_SLACK_MIN_MS = 20 * MINUTE;
+const HABIT_START_SLACK_MAX_MS = 60 * MINUTE;
+
+function habitSlackMs(habit: SleepHabit): number {
+  const spread = (habit.spreadMin ?? 0) * MINUTE;
+  return Math.min(HABIT_START_SLACK_MAX_MS, Math.max(HABIT_START_SLACK_MIN_MS, spread));
+}
 /** A cuánto tiempo hacia atrás del hábito se busca si el inicio medido es «demasiado pronto». */
 const HABIT_REACH_MS = 9 * HOUR;
 
@@ -530,8 +543,9 @@ export function refineEdges(
     const early = minuteDiff(habit.startMin - 0, minutesOfDay(start));
     // `early` > 0: el hábito cae después del inicio estimado. Si es por menos
     // de la holgura el inicio vale; si es por mucho, se adelanta hasta el hábito.
-    if (early * MINUTE > HABIT_START_SLACK_MS && early * MINUTE <= HABIT_REACH_MS) {
-      const moved = start + early * MINUTE - HABIT_START_SLACK_MS;
+    const slack = habitSlackMs(habit);
+    if (early * MINUTE > slack && early * MINUTE <= HABIT_REACH_MS) {
+      const moved = start + early * MINUTE - slack;
       // Si lo que queda ya no parece una noche, el hábito se equivoca de día.
       if (end - moved >= 3 * HOUR) start = moved;
     }
@@ -627,7 +641,7 @@ function overlongByHabit(
   const first = new Date(start);
   first.setHours(Math.floor(habit.startMin / 60), habit.startMin % 60, 0, 0);
   for (let d = 0; d < 2; d++) {
-    const cand = first.getTime() + d * 24 * HOUR - HABIT_START_SLACK_MS;
+    const cand = first.getTime() + d * 24 * HOUR - habitSlackMs(habit);
     if (cand < start) continue;
     const tail = end - cand;
     if (tail >= MIN_TAIL_MS && tail <= MAX_PLAUSIBLE_SLEEP_MS) return { start: cand, end, inferred: true };

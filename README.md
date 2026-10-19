@@ -201,9 +201,12 @@ hace ahora:
   baja. Si esa hora no cae dentro del hueco no hay noche que proponer.
 - **Aprendizaje ligero** ([`src/lib/habit.ts`](src/lib/habit.ts)). De las noches
   que corriges —editando la hora, escribiendo «me acosté a las 00:30» en el
-  comentario o diciendo «correcto»— se aprende tu hora de acostarte y
-  levantarte y tu latencia de sueño. Un inicio muy anterior a tu hora habitual se
-  adelanta hasta ella.
+  comentario o diciendo «correcto» o «es un margen aceptable»— se aprende tu
+  hora de acostarte y levantarte, cuánto varía de una noche a otra y tu latencia
+  de sueño (también de las noches que das por buenas, no sólo de las que
+  corriges). Un inicio muy anterior a tu hora habitual se adelanta hasta ella,
+  menos lo que sueles variar (entre 20 min y 1 h), para no llevar a la media
+  una noche en que de verdad te acostaste pronto.
 
 Las propuestas se guardan en **cola**, no de una en una: quien pasa un fin de
 semana sin abrir la app vuelve con tres noches que confirmar, y antes la última

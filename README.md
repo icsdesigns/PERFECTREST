@@ -24,7 +24,7 @@ Otros comandos:
 | `npm run dev` | Servidor de desarrollo con recarga en caliente |
 | `npm run build` | Compila a `dist/` (lo que consume el APK) |
 | `npm run typecheck` | Comprueba tipos sin compilar |
-| `npm run check` | Ejecuta las comprobaciones de dominio, de noches simuladas y de render |
+| `npm run check` | Ejecuta las comprobaciones de dominio, de noches simuladas, de precisión, el banco de pruebas con noches reales y el render |
 | `npm run icons` | Regenera los PNG del icono desde `public/logo.svg` |
 | `npm run release` | Compila y firma la APK de release en `release/` |
 | `npm run preview` | Sirve el build de producción |
@@ -128,6 +128,25 @@ El sexto no mide nada: cuando una noche no ha dejado **ninguna** otra señal,
 propone la sesión que marca tu meta para que la corrijas a mano. Va siempre con
 confianza baja y viene desactivado de fábrica.
 
+**Sensores opcionales** ([`src/lib/sensors.ts`](src/lib/sensors.ts),
+[`SensorWatcher.java`](android/app/src/main/java/com/perfectrest/app/SensorWatcher.java)).
+Los disparadores miden cuándo se usa el móvil; los sensores miden qué pasa a su
+alrededor mientras no se usa. Se activan por separado en Ajustes, vienen
+apagados, no usan el micrófono y se degradan si falta el sensor o el permiso:
+
+| Sensor | Qué registra | Para qué se usa |
+| --- | --- | --- |
+| **Pasos y movimiento** | contador de pasos con entrega diferida (permiso «Actividad física»; sin él, movimiento significativo) | inicio = fin de la última actividad; despertar = primeros pasos sostenidos |
+| **Luz ambiente** | cambios de nivel: oscuro / tenue / claro | la luz que se apaga marca el inicio; la oscuridad puntúa la confianza |
+| **Proximidad** | móvil tapado / libre (sólo la variante que no despierta el procesador) | actividad al cogerlo de nuevo; quietud |
+| **Próxima alarma** | `getNextAlarmClock`, sin permiso | si suena cerca del final, sube la confianza; con la pantalla encendida a esa hora, marca el despertar |
+| **Audio sonando** | `isMusicActive`, muestreado con el vigilante de 15 min | mientras suene aún no se ha dormido |
+
+Sin wakelocks permanentes: los sensores entregan en lotes de 10 minutos y la
+alarma y el audio sólo se consultan cuando el servicio ya está despierto. Todo
+va al **registro bruto** (un evento por línea), que se cruza con cada hueco y se
+exporta en CSV o JSON desde Ajustes, junto al historial.
+
 **Una noche no llega entera.** Ni el servicio ni la capa web pueden dar por
 buena la primera señal de vuelta que reciben, porque durante la noche llegan
 muchas que no lo son: Android sale de Doze cada pocas horas a su ventana de
@@ -142,7 +161,8 @@ defensas lo evitan:
   cualquier hueco que se cerrara por debajo del mínimo si vuelve a abrirse en
   los 15 minutos siguientes. Una ida al baño no parte la noche en dos.
 - La capa web **agrupa** los huecos que describen una misma noche —solapados o
-  separados por menos de 45 minutos— en vez de exigir solape estricto.
+  separados por menos de 15 minutos, lo mismo que aguanta el servicio— en vez de
+  exigir solape estricto.
 
 De cada grupo se toma el borde de la **señal más directa** que contenga: la
 pantalla, que mide el bloqueo real, manda sobre el cargador (que se enchufa
@@ -150,9 +170,40 @@ antes y se desenchufa después) y sobre Doze (que llega tarde y a trozos). La
 coincidencia de varias señales sube el nivel de confianza. Toda sesión se puede
 confirmar, ajustar o descartar:
 
-- **fiable** — empieza y termina dentro de la ventana nocturna y dura entre 4 y 11 h, o dos disparadores independientes coinciden.
-- **estimada** — sólo uno de los dos extremos cae en la ventana nocturna.
-- **dudosa** — demasiado corto, demasiado largo, fuera de horas, o deducido del horario.
+- **fiable** — la puntuación combinada supera 0,7.
+- **estimada** — entre 0,45 y 0,7.
+- **dudosa** — por debajo de 0,45, demasiado corto, más largo que el máximo que fijes, o con el inicio deducido de tu hábito o del horario.
+
+La puntuación ya no mira sólo la duración y la hora: combina **duración**
+(6-10 h es lo más creíble), **cercanía a tu hora habitual** de acostarte y
+levantarte, **acuerdo entre disparadores independientes** y, si activas los
+sensores, **quietud**, **oscuridad** y **coincidencia con la alarma**. Las
+evidencias que faltan no puntúan ni a favor ni en contra.
+
+**Afinar el inicio y el final** ([`src/lib/activityMonitor.ts`](src/lib/activityMonitor.ts)).
+Con datos reales el inicio salía de una a dos horas antes de lo cierto (se
+suelta el móvil y se sigue despierto) y a veces el final se inflaba. Lo que se
+hace ahora:
+
+- **El final es el primer uso sostenido**, no el primer desbloqueo. El servicio
+  sólo cierra la noche cuando el móvil se usa 5 minutos o se desbloquea 3 veces
+  en un rato; un desbloqueo de segundos a las seis de la mañana es un
+  *micro-despertar* y queda anotado en el hueco (`wakes`). Si un micro-despertar
+  cae justo antes del uso sostenido (menos de 75 min), el despertar fue ése.
+- **Una noche principal por día.** La tarde quieta y la mañana de después de
+  despertar no se proponen como sueño; un hueco corto (menos de 4,5 h) que no
+  empieza cerca de tu hora de acostarte se descarta, y los demás huecos del
+  día sólo sobreviven como siesta con indicios propios (dos señales
+  independientes, o sensores con oscuridad y quietud).
+- **Techo de 13 h.** Un hueco mayor suele ser una tarde despierto más la noche:
+  se parte por el micro-despertar que deja una noche creíble junto a tu hora de
+  acostarte, y si no lo hay la noche empieza a tu hora habitual con confianza
+  baja. Si esa hora no cae dentro del hueco no hay noche que proponer.
+- **Aprendizaje ligero** ([`src/lib/habit.ts`](src/lib/habit.ts)). De las noches
+  que corriges —editando la hora, escribiendo «me acosté a las 00:30» en el
+  comentario o diciendo «correcto»— se aprende tu hora de acostarte y
+  levantarte y tu latencia de sueño. Un inicio muy anterior a tu hora habitual se
+  adelanta hasta ella.
 
 Las propuestas se guardan en **cola**, no de una en una: quien pasa un fin de
 semana sin abrir la app vuelve con tres noches que confirmar, y antes la última
@@ -223,7 +274,7 @@ martes 07:10 es «la noche del martes».
 
 ## Comprobaciones
 
-`npm run check` ejecuta tres suites, sin dependencias de testing:
+`npm run check` ejecuta cinco suites, sin dependencias de testing:
 
 - **Dominio** ([`scripts/selfcheck.ts`](scripts/selfcheck.ts)) — cálculo de ciclos
   en ambos sentidos, propagación de metas entre modos, ventanas que cruzan
@@ -231,6 +282,18 @@ martes 07:10 es «la noche del martes».
   inactividad, y el formato de las etiquetas de release.
 - **Noches simuladas** ([`scripts/nightsim.ts`](scripts/nightsim.ts)) — una noche
   entera, del evento de Android a la sesión propuesta.
+- **Precisión** ([`scripts/precisioncheck.ts`](scripts/precisioncheck.ts)) — la
+  lectura de los comentarios con la hora real, el hábito y la latencia
+  aprendidos, la noche principal por día, los micro-despertares, la confianza
+  combinada y los sensores.
+- **Banco de pruebas** ([`scripts/backtest.ts`](scripts/backtest.ts)) — carga un
+  historial real con comentarios («me acosté a las 00:30», «correcto», «no he
+  dormido»), reconstruye el hueco bruto de cada sesión y lo hace pasar de nuevo
+  por la tubería actual, midiendo error de inicio y final, falsos positivos y
+  noches perdidas frente a lo que se guardó. Usa un fixture reducido
+  (`scripts/fixtures/sueno-etiquetado.json`); con
+  `PERFECTREST_LABELED=/ruta/historial.json npm run check` (y
+  `PERFECTREST_VERBOSE=1` para el detalle noche a noche) se lanza con tus datos.
 - **Render** ([`scripts/rendercheck.tsx`](scripts/rendercheck.tsx)) — cada
   pantalla se renderiza fuera del navegador para detectar errores de render.
 
@@ -522,6 +585,10 @@ src/
     schedule.ts          Módulo 1: metas y modos de personalización
     notifications.ts     Módulo 1: avisos (nativos y de navegador)
     activityMonitor.ts   Módulo 3: detección por inactividad
+    habit.ts             Módulo 3: hábito de sueño y latencia aprendidos
+    noteTimes.ts         Módulo 3: hora real que cuenta el comentario de una noche
+    rawEvents.ts         Módulo 3: registro bruto y evidencias de los sensores
+    sensors.ts           Módulo 3: catálogo de sensores opcionales
     updater.ts           Autoactualización: API de GitHub y versiones
     triggers.ts          Módulo 3: catálogo de disparadores
     triggerLog.ts        Módulo 3: registro de señales, huecos y descartes

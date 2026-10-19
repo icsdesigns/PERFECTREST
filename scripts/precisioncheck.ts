@@ -343,6 +343,21 @@ console.log('\n--- Precisión: sensores ---');
       clock(r.results[0].session.start) === '00:15' &&
       clock(r.results[0].session.end) === '07:35',
     r.results.map((x) => `${clock(x.session.start)}→${clock(x.session.end)}`));
+  // Con el cargador también activo, la fusión conserva los bordes de los sensores
+  // y avisa de que el inicio lo fijó un sensor (el hábito no debe pisarlo).
+  const both = evaluateGaps(
+    [
+      gap('2026-09-21T22:10:00', '2026-09-22T09:10:00'),
+      gap('2026-09-21T21:50:00', '2026-09-22T09:30:00', { startTrigger: 'charger', endTrigger: 'charger' }),
+    ],
+    { ...on('steps', 'light'), triggers: { ...DEFAULT_TRIGGERS, charger: true } },
+    { habit, events: night },
+  );
+  assert('la fusión de dos disparadores conserva los bordes de los sensores',
+    both.results.length === 1 &&
+      clock(both.results[0].session.start) === '00:15' &&
+      both.results[0].evidence?.activityAt != null,
+    both.results.map((x) => `${clock(x.session.start)} ${x.evidence?.activityAt}`));
   const plain = evaluateGaps([gap('2026-09-21T22:10:00', '2026-09-22T09:10:00')], MON, { habit, events: night });
   assert('con los sensores apagados la misma noche conserva los bordes del móvil',
     plain.results.length === 1 && clock(plain.results[0].session.start) === '22:10');

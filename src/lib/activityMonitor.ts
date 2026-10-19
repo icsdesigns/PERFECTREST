@@ -465,7 +465,8 @@ function fuseCluster(
     evidence: evidence && { ...evidence, activityAt: null, wakeAt: null },
     detected: { start: detectedStart, end: detectedEnd },
   });
-  if ('result' in fused) return fused.result;
+  // Se devuelve la evidencia completa: dice si el inicio lo fijó un sensor.
+  if ('result' in fused) return { ...fused.result, evidence: evidence ?? undefined };
 
   // Si el tramo resultante ya no fuera plausible se conserva el trozo más
   // largo, que es la mejor aproximación disponible, en vez de perder la noche.

@@ -4,6 +4,7 @@ import { buildNights, summarize } from '../src/lib/stats';
 import { circularMeanMinutes, formatDuration, formatTime, inWindow } from '../src/lib/time';
 import {
   evaluateGap,
+  evaluateGaps,
   mergeDetections,
   proposeFromSchedule,
   refineEdges,
@@ -206,12 +207,19 @@ assert('la fusión se queda con el borde de la señal más directa',
 
 // Un mismo disparador puede dejar la noche en trozos —Doze sale a su ventana
 // de mantenimiento y vuelve a entrar—, y esos trozos son una noche, no varias.
-const trozo1 = evaluateGap(at('2026-08-18T23:45:00'), at('2026-08-19T03:00:00'), mon, ['idle'])!;
-const trozo2 = evaluateGap(at('2026-08-19T03:10:00'), at('2026-08-19T07:00:00'), mon, ['idle'])!;
-const unida = mergeDetections([trozo1, trozo2], mon);
+// Cada trozo suelto es corto y el segundo empieza de madrugada, así que por
+// separado ninguno pasaría por noche: se juzgan ya unidos, como hace la cola
+// nativa (`evaluateGaps`), y no trozo a trozo con `evaluateGap`.
+const trozos = [
+  { start: at('2026-08-18T23:45:00'), end: at('2026-08-19T03:00:00'), startTrigger: 'idle', endTrigger: 'idle' },
+  { start: at('2026-08-19T03:10:00'), end: at('2026-08-19T07:00:00'), startTrigger: 'idle', endTrigger: 'idle' },
+] as const;
+assert('el segundo trozo, suelto, no pasaría por noche',
+  evaluateGap(trozos[1].start, trozos[1].end, mon, ['idle']) === null);
+const unida = evaluateGaps([...trozos], mon).results;
 assert('dos trozos del mismo disparador se unen en una noche', unida.length === 1, unida.length);
 assert('y la noche abarca de principio a fin',
-  unida[0]?.session.start === trozo1.session.start && unida[0]?.session.end === trozo2.session.end);
+  unida[0]?.session.start === trozos[0].start && unida[0]?.session.end === trozos[1].end);
 
 // Pero el puente sólo salva interrupciones cortas: dos noches distintas
 // siguen siendo dos.
@@ -227,8 +235,12 @@ assert('un hueco que sólo toca la noche por un extremo es de confianza media',
   evening.session.confidence === 'medium', evening.session.confidence);
 const corroborated = evaluateGap(at('2026-08-18T19:30:00'), at('2026-08-19T00:30:00'), mon,
   ['screen', 'charger'])!;
-assert('pero sube a alta si dos disparadores coinciden',
-  corroborated.session.confidence === 'high', corroborated.session.confidence);
+// Que coincidan dos disparadores puntúa a favor, pero ya no basta para dar
+// por segura una tarde: lo que la hace dudosa es la hora, no la señal.
+assert('dos disparadores que coinciden puntúan más que uno',
+  (corroborated.score ?? 0) > (evening.score ?? 0), [corroborated.score, evening.score]);
+assert('pero una tarde de 19:30 no llega a confianza alta',
+  corroborated.session.confidence === 'medium', corroborated.session.confidence);
 
 const noches: SleepSession[] = [];
 const flatSchedule: ScheduleSettings = { mode: 'uniform', goals: { ...DEFAULT_GOALS } };

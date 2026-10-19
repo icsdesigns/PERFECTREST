@@ -73,7 +73,12 @@ export function parseNote(session: Pick<SleepSession, 'start' | 'end' | 'note' |
   for (const line of lines) {
     const lower = line.toLowerCase();
     if (/\b(no (he )?dormido|no dorm[ií]|esto es falso|\bfalso\b)/.test(lower)) out.notSleep = true;
-    if (/\bcorrect[oa]\b|\btal cual\b/.test(lower) && !/incorrect/.test(lower)) out.accepted = true;
+    // «Es un error aceptable», «margen aceptable»: el usuario da la sesión por buena.
+    if (
+      /\bcorrect[oa]\b|\btal cual\b|\baceptable\b/.test(lower) &&
+      !/incorrect|\bno (es )?aceptable/.test(lower)
+    )
+      out.accepted = true;
 
     const hit = clockIn(line);
     if (!hit) continue;

@@ -154,6 +154,8 @@ const DEFAULT_HABIT: SleepHabit = { startMin: 23 * 60 + 30, endMin: 7 * 60 + 30,
 
 /** Un hueco corto sólo es una noche si empieza a esta distancia de tu hora de acostarte. */
 const SHORT_NIGHT_START_TOLERANCE_MIN = 210;
+/** Un hueco corto que no llega a esto pasada tu hora de acostarte es la tarde, no la noche. */
+const SHORT_NIGHT_END_AFTER_BEDTIME_MIN = 90;
 
 /** Disparadores que dependen del servicio nativo. */
 export const NATIVE_TRIGGERS: TriggerId[] = TRIGGERS.filter((t) => t.native).map((t) => t.id);
@@ -198,10 +200,13 @@ export function evaluateGap(
  * un desbloqueo partió en dos también es corto y empieza de madrugada.
  */
 function outOfPattern(start: number, end: number, habit: SleepHabit): boolean {
-  return (
-    end - start < SHORT_NIGHT_MS &&
-    Math.abs(minuteDiff(minutesOfDay(start), habit.startMin)) > SHORT_NIGHT_START_TOLERANCE_MIN
-  );
+  if (end - start >= SHORT_NIGHT_MS) return false;
+  if (Math.abs(minuteDiff(minutesOfDay(start), habit.startMin)) > SHORT_NIGHT_START_TOLERANCE_MIN) return true;
+  // La tarde quieta que termina cuando tú te acuestas (20:40 → 23:40 con
+  // costumbre de las 23:00) empieza «cerca» de tu hora, pero no ha dormido nada
+  // de tu noche: se coge el móvil justo para irse a la cama. Era el falso
+  // positivo que quedaba mientras el hábito aún no se ha aprendido.
+  return minuteDiff(minutesOfDay(end), habit.startMin) < SHORT_NIGHT_END_AFTER_BEDTIME_MIN;
 }
 
 /** ¿Toca el tramo la ventana nocturna, o la atraviesa entera? */

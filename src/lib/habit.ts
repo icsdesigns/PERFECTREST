@@ -122,7 +122,11 @@ export function learnHabit(
 export function learnLatency(sessions: SleepSession[]): number | null {
   const samples: number[] = [];
   for (const s of sessions) {
-    const real = knownStart(s);
+    // Una sesión aceptada tal cual («correcto») también es una medida: dice que
+    // el inicio corregido era el bueno. Sin ella sólo enseñaban las noches que
+    // salieron mal, y la latencia aprendida se inflaba justo con los errores.
+    const truth = parseNote(s);
+    const real = knownStart(s) ?? (truth.accepted && !truth.notSleep ? s.start : null);
     const detected = detectedStartOf(s);
     if (real === null || detected === null) continue;
     const delta = (real - detected) / MINUTE;

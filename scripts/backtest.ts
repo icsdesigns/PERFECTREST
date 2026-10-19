@@ -237,14 +237,15 @@ report('después (en línea)', online);
 report('después (una menos)', looM);
 
 if (process.env.PERFECTREST_VERBOSE) {
-  console.log('\n  noche a noche (hora de acostarse: medida / real / antes / después):');
+  console.log('\n  noche a noche (hora de acostarse: medida / real / antes / después, una menos / en línea):');
   const hm = (ts: number) => new Date(ts).toTimeString().slice(0, 5);
   history.forEach((s, i) => {
     const t = truths[i];
     if (t.start === null) return;
     const a = loo[i].session;
+    const o = onlineRun[i].session;
     console.log(
-      `    medida ${hm(s.detectedStart ?? s.start)}  real ${hm(t.start)}  antes ${hm(s.start)} (${min(s.start - t.start)} min)  después ${a ? `${hm(a.start)} (${min(a.start - t.start)} min, ${a.confidence})` : 'descartada'}`,
+      `    medida ${hm(s.detectedStart ?? s.start)}  real ${hm(t.start)}  antes ${hm(s.start)} (${min(s.start - t.start)} min)  después ${a ? `${hm(a.start)} (${min(a.start - t.start)} min, ${a.confidence})` : 'descartada'}  en línea ${o ? `${min(o.start - t.start)} min` : 'descartada'}`,
     );
   });
 }
@@ -286,9 +287,9 @@ if (usingFixture) {
     [looM.missed, online.missed],
   );
   assert(
-    'los falsos positivos etiquetados desaparecen',
-    looM.falsePositives < before.falsePositives,
-    [looM.falsePositives, before.falsePositives],
+    'los falsos positivos etiquetados desaparecen, también en línea (sin hábito aprendido aún)',
+    looM.falsePositives === 0 && online.falsePositives === 0 && before.falsePositives > 0,
+    [looM.falsePositives, online.falsePositives, before.falsePositives],
   );
   assert(
     'las sesiones cortas sospechosas se reducen al menos a un tercio',

@@ -96,6 +96,10 @@ console.log('\n--- Precisión: lo que cuenta el comentario ---');
   assert('«no he dormido… es correcto» se contradice: no se usa a favor ni en contra',
     !i.accepted && !i.notSleep && i.start === null);
   assert('una sesión sin comentario no da nada', parseNote(base).start === null && !parseNote(base).accepted);
+  assert('«es un margen aceptable» da la sesión por buena',
+    p('Me fui a dormir unos minutos antes, pero es un margen aceptable').accepted);
+  assert('«no es aceptable» no', !p('Esto no es aceptable').accepted);
+  assert('ni «inaceptable»', !p('Un error inaceptable').accepted);
 }
 
 // --- Hábito y latencia ------------------------------------------------------
@@ -146,6 +150,17 @@ console.log('\n--- Precisión: hábito y latencia aprendidos ---');
   const lat = learnLatency(near);
   assert('la latencia es la mediana entre el inicio medido y el real', lat !== null && Math.abs(lat - 15) < 1, lat);
   assert('un desfase de horas no es latencia de dormirse: se ignora', learnLatency(taught) === null);
+
+  // Las noches aceptadas tal cual también enseñan: si se dieron por buenas con
+  // 15 min de latencia, la latencia es ésa. Sin ellas sólo enseñaban las noches
+  // que salieron mal y la latencia aprendida se inflaba.
+  const accepted = [10, 11, 12].map((d) => night(d, 1, 0, { note: 'Correcto' }, 30 * MINUTE));
+  const corrected = night(14, 0, 30, { note: 'Me acosté sobre las 00:30' }, 45 * MINUTE);
+  const mixedLat = learnLatency([...accepted, corrected]);
+  assert('las noches aceptadas cuentan para la latencia',
+    mixedLat !== null && Math.abs(mixedLat - 15) < 1, mixedLat);
+  assert('pero «no he dormido… es correcto» no',
+    learnLatency([...accepted, night(15, 1, 0, { note: 'No he dormido aún\nEs correcto' }, 30 * MINUTE)]) === null);
 }
 
 // --- Elección de la noche del día ------------------------------------------
@@ -173,6 +188,21 @@ console.log('\n--- Precisión: una noche principal por día ---');
   assert('y si roza la ventana nocturna, lo para el patrón de tu hora de acostarte',
     tardeNoche.results.length === 0 && tardeNoche.rejected[0]?.reason === 'out-of-pattern',
     tardeNoche.rejected[0]?.reason);
+
+  // Con el hábito todavía sin aprender (del horario: 23:00), una tarde quieta
+  // que acaba justo al irse a la cama empieza «cerca» de esa hora, pero no
+  // cubre nada de la noche: como el falso positivo «20:43 → 23:41» de los datos.
+  const sinHabito = { startMin: 23 * 60, endMin: 7 * 60, n: 0 };
+  const tardeHastaLaCama = evaluateGaps([gap('2026-09-24T20:35:00', '2026-09-24T23:41:00')], MON, {
+    habit: sinHabito,
+  });
+  assert('una tarde quieta que termina al acostarte no es una noche',
+    tardeHastaLaCama.results.length === 0 && tardeHastaLaCama.rejected[0]?.reason === 'out-of-pattern',
+    tardeHastaLaCama.rejected[0]?.reason);
+  const nocheCorta = evaluateGaps([gap('2026-09-25T00:40:00', '2026-09-25T04:50:00')], MON, {
+    habit: sinHabito,
+  });
+  assert('pero una noche corta que sí cubre la madrugada se propone', nocheCorta.results.length === 1);
 
   const tardeYnoche = evaluateGaps(
     [gap('2026-09-24T17:41:00', '2026-09-24T21:21:00'), gap('2026-09-24T22:29:00', '2026-09-25T07:36:00')],

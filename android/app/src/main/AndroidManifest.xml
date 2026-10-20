@@ -98,12 +98,19 @@
          ninguno, y ninguno usa el micrófono. -->
     <uses-permission android:name="android.permission.ACTIVITY_RECOGNITION" />
 
+    <!-- Sólo para la lectura de postura del móvil: un wakelock de unos segundos
+         que se suelta solo (acquire con tiempo), para que el procesador no se
+         duerma a mitad de la lectura del acelerómetro. Nunca hay uno
+         permanente. El acelerómetro no pide permiso. -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
     <!-- Ningún sensor es obligatorio: sin ellos la app sigue detectando con el
          uso del móvil. Declararlos opcionales evita que Play oculte la app en
          los móviles que no los traen. -->
     <uses-feature android:name="android.hardware.sensor.stepcounter" android:required="false" />
     <uses-feature android:name="android.hardware.sensor.light" android:required="false" />
     <uses-feature android:name="android.hardware.sensor.proximity" android:required="false" />
+    <uses-feature android:name="android.hardware.sensor.accelerometer" android:required="false" />
 
     <!-- Autoactualización desde las releases de GitHub. Sólo abre el instalador
          del sistema: la instalación silenciosa exige ser device owner. -->

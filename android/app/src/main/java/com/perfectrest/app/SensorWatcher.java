@@ -12,6 +12,9 @@ import android.hardware.TriggerEvent;
 import android.hardware.TriggerEventListener;
 import android.media.AudioManager;
 import android.os.Build;
+import android.os.Handler;
+import android.os.Looper;
+import android.os.PowerManager;
 import android.os.SystemClock;
 
 import androidx.core.content.ContextCompat;
@@ -48,6 +51,14 @@ import java.util.Set;
  *   alarm      la próxima alarma del reloj, consultada al apagarse la pantalla y
  *              con cada rearme del vigilante; no hay nada que escuchar.
  *   audio      si suena algo, consultado en esos mismos momentos.
+ *   posture    postura del móvil con el acelerómetro, en lecturas puntuales: con
+ *              la pantalla apagada y de noche, en cada rearme del vigilante
+ *              (cada diez minutos con este sensor) se escucha el acelerómetro
+ *              unos dos segundos y se anota si el móvil está plano y quieto
+ *              (sobre la mesa o la cama, boca arriba o abajo), inclinado y
+ *              quieto (un soporte), o en el bolsillo o la mano (inclinado y con
+ *              vaivén). Entre lecturas no hay nada registrado, y durante la
+ *              lectura sólo un wakelock de unos segundos que se suelta solo.
  */
 final class SensorWatcher {
 
@@ -56,6 +67,35 @@ final class SensorWatcher {
     static final String PROXIMITY = "proximity";
     static final String ALARM = "alarm";
     static final String AUDIO = "audio";
+    static final String POSTURE = "posture";
+
+    /** Posturas anotadas en el registro bruto; los mismos valores que {@code POSTURE_*} en rawEvents.ts. */
+    static final int POSTURE_FLAT_UP = 0;
+    static final int POSTURE_FLAT_DOWN = 1;
+    static final int POSTURE_CARRIED = 2;
+    static final int POSTURE_TILTED = 3;
+    /** La lectura no sirve (el móvil cae, o el sensor entrega basura). */
+    static final int POSTURE_INVALID = -1;
+
+    /** Cuánto se escucha el acelerómetro en cada lectura. */
+    private static final long POSTURE_WINDOW_MS = 2_500L;
+    /** Tope de muestras por lectura (con SENSOR_DELAY_UI salen unas 40). */
+    private static final int POSTURE_MAX_SAMPLES = 96;
+    /** Por debajo de esto la lectura no es fiable. */
+    private static final int POSTURE_MIN_SAMPLES = 8;
+    /** Dos lecturas más cerca que esto se funden en una: un SCREEN_OFF y el vigilante no suman dos. */
+    private static final long POSTURE_MIN_SPACING_MS = 4 * 60_000L;
+    /** El wakelock de la lectura se suelta solo aunque algo falle. */
+    private static final long POSTURE_WAKELOCK_MS = 6_000L;
+    /**
+     * Umbrales sin calibrar con datos reales: ver «Limitaciones» en el README.
+     * Inclinación máxima respecto a la horizontal para dar el móvil por plano.
+     */
+    static final float POSTURE_FLAT_MAX_TILT_DEG = 15f;
+    /** Plano: el vaivén (desviación típica de la aceleración, m/s²) que aún se da por mesa o cama. */
+    static final float POSTURE_FLAT_MAX_SD = 0.35f;
+    /** Inclinado: por encima de este vaivén se lleva encima. */
+    static final float POSTURE_TILTED_MAX_SD = 0.12f;
 
     /** Los sensores muestreados son los que entregan lotes: el búfer del chip hace el trabajo. */
     private static final int BATCH_LATENCY_US = 10 * 60 * 1_000_000;
@@ -82,6 +122,15 @@ final class SensorWatcher {
     private TriggerEventListener motionListener;
     private Sensor motionSensor;
 
+    private final Handler postureHandler = new Handler(Looper.getMainLooper());
+    private SensorEventListener postureListener;
+    private PowerManager.WakeLock postureLock;
+    private long lastPostureAt = 0L;
+    private final float[] posX = new float[POSTURE_MAX_SAMPLES];
+    private final float[] posY = new float[POSTURE_MAX_SAMPLES];
+    private final float[] posZ = new float[POSTURE_MAX_SAMPLES];
+    private int posN = 0;
+
     private float lastStepCount = -1f;
     private int lastLightLevel = -1;
     private int lastProximity = -1;
@@ -101,7 +150,7 @@ final class SensorWatcher {
      * llama en cada rearme.
      */
     void apply(Set<String> wanted) {
-        for (String id : new String[] {STEPS, LIGHT, PROXIMITY, ALARM, AUDIO}) {
+        for (String id : new String[] {STEPS, LIGHT, PROXIMITY, ALARM, AUDIO, POSTURE}) {
             boolean want = wanted.contains(id);
             boolean have = active.contains(id);
             if (want && !have) {
@@ -134,6 +183,14 @@ final class SensorWatcher {
                 case ALARM:
                 case AUDIO:
                     // Sin escucha: se consultan en `sample`.
+                    return true;
+                case POSTURE:
+                    // Tampoco hay escucha permanente: el acelerómetro sólo se
+                    // abre unos segundos en cada lectura. Aquí basta con que exista.
+                    if (sensors == null || sensors.getDefaultSensor(Sensor.TYPE_ACCELEROMETER) == null) {
+                        return false;
+                    }
+                    SleepMonitorService.logEvent(context, null, "service", "postura del móvil activa");
                     return true;
                 default: return false;
             }
@@ -169,6 +226,9 @@ final class SensorWatcher {
                 if (proximityListener != null) sensors.unregisterListener(proximityListener);
                 proximityListener = null;
                 lastProximity = -1;
+                break;
+            case POSTURE:
+                endPostureReading(false);
                 break;
             default:
                 break;
@@ -350,6 +410,139 @@ final class SensorWatcher {
             }
             audioWasActive = playing;
         }
+
+        if (active.contains(POSTURE)) samplePosture(now);
+    }
+
+    // --- Postura: lecturas puntuales del acelerómetro ---
+
+    /**
+     * Una lectura de postura, si toca: de noche, con la pantalla apagada y sin
+     * otra reciente. Es asíncrona —los eventos del sensor llegan por el bucle
+     * principal— y por eso no bloquea nada: abre el acelerómetro, lo escucha
+     * {@link #POSTURE_WINDOW_MS} y lo cierra.
+     */
+    private void samplePosture(long now) {
+        if (sensors == null || postureListener != null) return;
+        if (now - lastPostureAt < POSTURE_MIN_SPACING_MS) return;
+        // Con la pantalla encendida el móvil está en uso, no en reposo.
+        PowerManager power = (PowerManager) context.getSystemService(Context.POWER_SERVICE);
+        if (power == null || power.isInteractive()) return;
+        // Sólo importa la noche: fuera de ella las lecturas llenarían el registro bruto.
+        if (!SleepMonitorService.inNightWindow(context, now)) return;
+
+        Sensor accel = sensors.getDefaultSensor(Sensor.TYPE_ACCELEROMETER);
+        if (accel == null) return;
+
+        // Sin esto el procesador puede dormirse a mitad de lectura. Se suelta
+        // solo: no hay ningún wakelock que alguien tenga que acordarse de liberar.
+        try {
+            postureLock = power.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "PerfectRest:postura");
+            postureLock.setReferenceCounted(false);
+            postureLock.acquire(POSTURE_WAKELOCK_MS);
+        } catch (RuntimeException e) {
+            postureLock = null;
+        }
+
+        posN = 0;
+        lastPostureAt = now;
+        postureListener = new SensorEventListener() {
+            @Override
+            public void onSensorChanged(SensorEvent event) {
+                if (event.values == null || event.values.length < 3 || posN >= POSTURE_MAX_SAMPLES) return;
+                posX[posN] = event.values[0];
+                posY[posN] = event.values[1];
+                posZ[posN] = event.values[2];
+                posN++;
+                if (posN >= POSTURE_MAX_SAMPLES) endPostureReading(true);
+            }
+
+            @Override
+            public void onAccuracyChanged(Sensor sensor, int accuracy) {}
+        };
+        boolean ok;
+        try {
+            ok = sensors.registerListener(postureListener, accel, SensorManager.SENSOR_DELAY_UI);
+        } catch (RuntimeException e) {
+            ok = false;
+        }
+        if (!ok) {
+            postureListener = null;
+            releasePostureLock();
+            return;
+        }
+        postureHandler.postDelayed(() -> endPostureReading(true), POSTURE_WINDOW_MS);
+    }
+
+    /** Cierra la lectura en curso; con {@code record}, clasifica y anota lo recogido. */
+    private void endPostureReading(boolean record) {
+        postureHandler.removeCallbacksAndMessages(null);
+        if (postureListener != null) {
+            if (sensors != null) sensors.unregisterListener(postureListener);
+            postureListener = null;
+            if (record) {
+                int posture = classifyPosture(posX, posY, posZ, posN);
+                if (posture != POSTURE_INVALID) {
+                    RawEventLog.addSensor(context, System.currentTimeMillis(), "posture", posture);
+                }
+            }
+        }
+        posN = 0;
+        releasePostureLock();
+    }
+
+    private void releasePostureLock() {
+        if (postureLock != null && postureLock.isHeld()) {
+            try {
+                postureLock.release();
+            } catch (RuntimeException ignored) {
+                // Ya se había soltado por tiempo.
+            }
+        }
+        postureLock = null;
+    }
+
+    /**
+     * Postura a partir de una ráfaga del acelerómetro, en m/s².
+     *
+     * La media da la gravedad: con el móvil quieto es el vector hacia abajo, y
+     * su ángulo con el eje Z de la pantalla dice cuánto está inclinado (y el
+     * signo de Z, si la pantalla mira arriba o abajo). La desviación típica
+     * dice cuánto se mueve. Es una función pura, sin sensores, para poder
+     * probarla con ráfagas inventadas.
+     *
+     *   plano (≤ 15° de la horizontal)   y casi sin vaivén  → plano, arriba o abajo
+     *   inclinado y casi sin vaivén                         → inclinado quieto (soporte, mano firme)
+     *   con vaivén (plano: mucho; inclinado: poco)          → en bolsillo o mano
+     */
+    static int classifyPosture(float[] x, float[] y, float[] z, int n) {
+        if (n < POSTURE_MIN_SAMPLES) return POSTURE_INVALID;
+        double mx = 0, my = 0, mz = 0;
+        for (int i = 0; i < n; i++) {
+            mx += x[i];
+            my += y[i];
+            mz += z[i];
+        }
+        mx /= n;
+        my /= n;
+        mz /= n;
+        double mag = Math.sqrt(mx * mx + my * my + mz * mz);
+        // Una media lejos de 9,8 m/s² es caída libre o un sensor roto, no una postura.
+        if (mag < 6.0 || mag > 14.0) return POSTURE_INVALID;
+
+        double var = 0;
+        for (int i = 0; i < n; i++) {
+            double dx = x[i] - mx, dy = y[i] - my, dz = z[i] - mz;
+            var += dx * dx + dy * dy + dz * dz;
+        }
+        double sd = Math.sqrt(var / n);
+        double tilt = Math.toDegrees(Math.acos(Math.min(1.0, Math.abs(mz) / mag)));
+
+        if (tilt <= POSTURE_FLAT_MAX_TILT_DEG) {
+            if (sd > POSTURE_FLAT_MAX_SD) return POSTURE_CARRIED;
+            return mz > 0 ? POSTURE_FLAT_UP : POSTURE_FLAT_DOWN;
+        }
+        return sd > POSTURE_TILTED_MAX_SD ? POSTURE_CARRIED : POSTURE_TILTED;
     }
 
     /** Los sensores marcan sus eventos con el reloj de arranque; la web usa la hora de pared. */
@@ -391,6 +584,8 @@ final class SensorWatcher {
             context.getSystemService(Context.ALARM_SERVICE) != null));
         out.put(AUDIO, new JSONObject().put("available",
             context.getSystemService(Context.AUDIO_SERVICE) != null));
+        out.put(POSTURE, new JSONObject().put("available",
+            manager != null && manager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER) != null));
         return out;
     }
 

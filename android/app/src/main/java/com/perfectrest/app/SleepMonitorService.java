@@ -90,7 +90,7 @@ import java.util.Set;
  * y la capa web decide qué hacer con ellos. Ver {@link #screenInUse(long)}.
  *
  * Junto a los disparadores, un {@link SensorWatcher} opcional registra pasos,
- * luz, proximidad, alarma y audio en el registro bruto ({@link RawEventLog}),
+ * luz, proximidad, alarma, audio y postura del móvil en el registro bruto ({@link RawEventLog}),
  * que la capa web cruza con cada hueco para afinar los bordes de la noche.
  *
  * Todo lo que puede fallar por un permiso que falta —entrar en primer plano,
@@ -284,8 +284,9 @@ public class SleepMonitorService extends Service {
         // Cada rearme es también una oportunidad de darse cuenta de que la
         // señal de vuelta se perdió y el hueco lleva horas sin poder cerrarse.
         healStuckGap(System.currentTimeMillis());
-        // El vigilante pasa cada quince minutos: es un momento barato para
-        // preguntar por la alarma y el audio sin ningún temporizador propio.
+        // El vigilante pasa cada quince minutos (diez con el sensor de postura):
+        // es un momento barato para preguntar por la alarma y el audio, y para
+        // una lectura de postura, sin ningún temporizador propio.
         if (sensorWatcher != null) sensorWatcher.sample();
         scheduleWatchdog(this);
         // START_STICKY: si el sistema mata el servicio por memoria, lo recrea.
@@ -462,8 +463,26 @@ public class SleepMonitorService extends Service {
      * que sí puede arrancar un servicio en primer plano desde segundo plano.
      */
     static void scheduleWatchdog(Context context) {
-        scheduleRestart(context, WATCHDOG_INTERVAL_MS);
+        scheduleRestart(context, watchdogIntervalMs(context));
     }
+
+    /**
+     * Con el sensor de postura el vigilante pasa cada diez minutos en vez de
+     * cada quince: es la cadencia de las lecturas, y dos seguidas en el bolsillo
+     * o la mano son lo que cuenta como un rato despierto. Sigue por encima de
+     * los nueve minutos que Android deja entre dos alarmas en reposo.
+     */
+    static long watchdogIntervalMs(Context context) {
+        String sensors = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getString(KEY_SENSORS, "");
+        for (String part : sensors.split(",")) {
+            if (part.trim().equals(SensorWatcher.POSTURE)) return POSTURE_WATCHDOG_INTERVAL_MS;
+        }
+        return WATCHDOG_INTERVAL_MS;
+    }
+
+    /** Intervalo del vigilante con el sensor de postura activo. */
+    private static final long POSTURE_WATCHDOG_INTERVAL_MS = 10 * 60_000L;
 
     static void scheduleRestart(Context context, long delayMs) {
         AlarmManager alarms = (AlarmManager) context.getSystemService(Context.ALARM_SERVICE);
@@ -674,7 +693,8 @@ public class SleepMonitorService extends Service {
         long at = now;
         long closedAt = prefs().getLong(shortCloseKey(trigger), 0L);
         long resumeFrom = prefs().getLong(shortOpenKey(trigger), 0L);
-        boolean resumed = closedAt > 0 && resumeFrom > 0 && now - closedAt <= REOPEN_GRACE_MS;
+        boolean resumed = closedAt > 0 && resumeFrom > 0
+            && now - closedAt <= REOPEN_GRACE_MS;
         if (resumed) at = resumeFrom;
 
         SharedPreferences.Editor edit = prefs().edit()
@@ -1285,10 +1305,15 @@ public class SleepMonitorService extends Service {
             + clock(start) + " a " + clock(end));
     }
 
-    /** ¿Cae este instante dentro de la ventana nocturna configurada? */
     private boolean inNightWindow(long ts) {
-        int startMin = prefs().getInt(KEY_NIGHT_START, 21 * 60 + 30);
-        int endMin = prefs().getInt(KEY_NIGHT_END, 11 * 60);
+        return inNightWindow(this, ts);
+    }
+
+    /** ¿Cae este instante dentro de la ventana nocturna configurada? */
+    static boolean inNightWindow(Context context, long ts) {
+        SharedPreferences p = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+        int startMin = p.getInt(KEY_NIGHT_START, 21 * 60 + 30);
+        int endMin = p.getInt(KEY_NIGHT_END, 11 * 60);
 
         Calendar cal = Calendar.getInstance();
         cal.setTimeInMillis(ts);

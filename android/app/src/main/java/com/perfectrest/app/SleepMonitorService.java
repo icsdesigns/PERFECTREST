@@ -178,7 +178,8 @@ public class SleepMonitorService extends Service {
      * mantenimiento, cerraban el hueco de la noche a las dos de la mañana y lo
      * reabrían a los pocos segundos: la noche entera se descartaba en trozos de
      * hora y media y no quedaba nada que proponer. Si la interrupción dura
-     * menos de {@link #REOPEN_GRACE_MS}, el hueco se reanuda desde donde
+     * menos de {@link #REOPEN_GRACE_MS} (con la pantalla, menos de un uso
+     * sostenido: ver {@link #canResume}), el hueco se reanuda desde donde
      * estaba en vez de empezar de cero.
      */
     public static String shortOpenKey(String trigger) {
@@ -187,6 +188,22 @@ public class SleepMonitorService extends Service {
 
     public static String shortCloseKey(String trigger) {
         return "shortCloseAt." + trigger;
+    }
+
+    /**
+     * ¿Fue breve la interrupción, para reanudar el hueco en vez de abrir otro?
+     *
+     * Con la pantalla, `elapsed` es lo que estuvo encendida: desde el
+     * desbloqueo que cerró el hueco hasta que se apagó otra vez. Un vistazo o
+     * una notificación (segundos) no parten la noche, pero un uso sostenido
+     * ({@link #SUSTAINED_USE_MS}, lo mismo que el servicio da por el final de
+     * una noche) sí: lo anterior no es sueño, y reanudar desde el borde viejo
+     * ponía el inicio antes del último uso real del móvil. Los demás
+     * disparadores no miden uso y conservan el margen largo.
+     */
+    static boolean canResume(String trigger, long elapsedMs) {
+        long grace = TRIGGER_SCREEN.equals(trigger) ? SUSTAINED_USE_MS : REOPEN_GRACE_MS;
+        return elapsedMs <= grace;
     }
 
     /** Instante del último aviso «has dormido X», para no repetirlo. */
@@ -694,7 +711,7 @@ public class SleepMonitorService extends Service {
         long closedAt = prefs().getLong(shortCloseKey(trigger), 0L);
         long resumeFrom = prefs().getLong(shortOpenKey(trigger), 0L);
         boolean resumed = closedAt > 0 && resumeFrom > 0
-            && now - closedAt <= REOPEN_GRACE_MS;
+            && canResume(trigger, now - closedAt);
         if (resumed) at = resumeFrom;
 
         SharedPreferences.Editor edit = prefs().edit()

@@ -287,6 +287,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       getContext: () => ({
         habit: habitNow(),
         known: knownNights(stateRef.current.sessions, stateRef.current.pendingSessions),
+        // La misma latencia que sumará `refineEdges`: con otra, la detección y
+        // el refinado no se pondrían de acuerdo sobre qué inicio es dudoso.
+        latencyMinutes: learnLatency(stateRef.current.sessions) ?? stateRef.current.cycles.latencyMinutes,
       }),
       onBeat: (ts) => dispatch({ type: 'patch', patch: { lastActiveAt: ts } }),
       onDeviceUse: (ts) => dispatch({ type: 'patch', patch: { lastDeviceUseAt: ts } }),

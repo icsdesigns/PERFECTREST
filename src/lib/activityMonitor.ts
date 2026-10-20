@@ -84,6 +84,12 @@ export interface DetectionContext {
   events?: RawEvent[];
   /** Noches ya registradas o a la espera de confirmar: ya tienen su noche principal. */
   known?: KnownNight[];
+  /**
+   * Latencia que `refineEdges` va a sumar al inicio (la aprendida, o la de
+   * ajustes). Sin ella se juzga con 15 min, y un inicio que con tu latencia real
+   * ya no es sospechoso salía marcado como dudoso para siempre.
+   */
+  latencyMinutes?: number;
 }
 
 /**
@@ -481,6 +487,7 @@ export function mergeDetections(
   results: DetectionResult[],
   settings: MonitorSettings,
   habit?: SleepHabit | null,
+  latencyMinutes?: number,
 ): DetectionResult[] {
   const sorted = [...results].sort((a, b) => a.session.start - b.session.start);
   const clusters: DetectionResult[][] = [];
@@ -515,13 +522,14 @@ export function mergeDetections(
     }
   }
 
-  return clusters.map((cluster) => fuseCluster(cluster, settings, habit));
+  return clusters.map((cluster) => fuseCluster(cluster, settings, habit, latencyMinutes));
 }
 
 function fuseCluster(
   cluster: DetectionResult[],
   settings: MonitorSettings,
   habit?: SleepHabit | null,
+  latencyMinutes?: number,
 ): DetectionResult {
   if (cluster.length === 1) return cluster[0];
 
@@ -544,6 +552,7 @@ function fuseCluster(
     detected: { start: detectedStart, end: detectedEnd },
     // Un inicio deducido del hábito sigue siéndolo aunque otra señal coincida.
     inferred: lead.some((r) => r.inferred),
+    latencyMinutes,
   });
   // Se devuelve la evidencia completa: dice si el inicio lo fijó un sensor.
   if ('result' in fused) return { ...fused.result, evidence: evidence ?? undefined };
@@ -818,6 +827,7 @@ export function evaluateGaps(
       detected: { start: gap.start, end: gap.end },
       lenient: true,
       inferred,
+      latencyMinutes: ctx.latencyMinutes,
     });
     if ('result' in out) {
       raw.push(out.result);
@@ -831,7 +841,12 @@ export function evaluateGaps(
   // fusionada, no sobre cada trozo: el rabo de una noche partida por un
   // desbloqueo también es corto y empieza de madrugada. Lo que no encaja sólo
   // sobrevive si trae indicios propios de siesta.
-  const fused = joinInterruptedNights(mergeDetections(raw, settings, habit), settings, habit);
+  const fused = joinInterruptedNights(
+    mergeDetections(raw, settings, habit, ctx.latencyMinutes),
+    settings,
+    habit,
+    ctx.latencyMinutes,
+  );
   const merged: DetectionResult[] = [];
   for (const r of fused) {
     const { start, end } = r.session;
@@ -878,6 +893,7 @@ function joinInterruptedNights(
   results: DetectionResult[],
   settings: MonitorSettings,
   habit: SleepHabit,
+  latencyMinutes?: number,
 ): DetectionResult[] {
   const sorted = [...results].sort((a, b) => a.session.start - b.session.start);
   const out: DetectionResult[] = [];
@@ -892,7 +908,7 @@ function joinInterruptedNights(
       r.session.start - prev.session.end <= AWAKE_BRIDGE_MS &&
       r.session.end - prev.session.start <= MAX_PLAUSIBLE_SLEEP_MS
     ) {
-      out[out.length - 1] = fuseCluster([prev, r], settings, habit);
+      out[out.length - 1] = fuseCluster([prev, r], settings, habit, latencyMinutes);
       continue;
     }
     out.push(r);
@@ -1248,8 +1264,10 @@ export function startMonitor(
       // El hueco entre aperturas de la app sólo se usa cuando el servicio
       // nativo no aportó nada, para no proponer la misma noche dos veces.
       if (!native.length && last !== null && triggerEnabled(settings, 'appOpen')) {
+        const context = getContext?.();
         const result = evaluateGap(last, now, settings, ['appOpen'], {
-          habit: getContext?.().habit,
+          habit: context?.habit,
+          latencyMinutes: context?.latencyMinutes,
         });
         if (result) {
           onDetect(result);

@@ -134,14 +134,19 @@ function replay(mode: Mode): Outcome[] {
     const learnFrom =
       mode === 'online' ? history.slice(0, i) : history.filter((_, j) => j !== i);
     const habit = learnHabit(learnFrom, SCHEDULE, s.end);
-    const { results, rejected } = evaluateGaps([gap], MON, { habit, known: knownNights([], known) });
+    const learned = learnLatency(learnFrom);
+    const { results, rejected } = evaluateGaps([gap], MON, {
+      habit,
+      known: knownNights([], known),
+      latencyMinutes: learned ?? LATENCY,
+    });
     const mine = results[0];
     if (!mine) {
       outcomes.push({ session: null, reason: rejected[0]?.reason });
       return;
     }
     const refined = refineEdges(mine.session, LATENCY, {
-      learnedLatencyMinutes: learnLatency(learnFrom),
+      learnedLatencyMinutes: learned,
       habit,
       evidence: mine.evidence,
     });

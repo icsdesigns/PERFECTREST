@@ -326,6 +326,16 @@ console.log('\n--- Precisión: confianza por evidencias ---');
     unverified.confidence === 'low' && unverified.inferred === true, [unverified.confidence, unverified.inferred]);
   assert('un inicio sólo algo anterior a tu hora no se marca dudoso',
     refineEdges(ideal.session, 15, { habit }).inferred === undefined);
+  // 21:40 + 15 min queda 95 min antes de las 23:30 (dudoso); con tu latencia
+  // aprendida de 30 min, 80 (no). Detección y refinado deben decir lo mismo.
+  const borderline = (latencyMinutes?: number) =>
+    evaluateGap(at('2026-09-18T21:40:00'), at('2026-09-19T07:30:00'), MON, ['screen'], { habit, latencyMinutes })!;
+  assert('con la latencia por defecto, 95 min antes de tu hora es dudoso', borderline().inferred === true);
+  const withLatency = borderline(30);
+  assert('con tu latencia aprendida ya no lo es, ni al detectar ni al refinar',
+    !withLatency.inferred &&
+      !refineEdges(withLatency.session, 15, { habit, learnedLatencyMinutes: 30 }).inferred,
+    [withLatency.inferred, withLatency.session.confidence]);
   assert('la oscuridad sin pasos también cuenta como quietud',
     clock(refineEdges(moved, 15, { habit, evidence: { ...NO_EVIDENCE, dark: 0.95, moves: 0, sensors: ['light', 'steps'] } }).start) === '23:10');
   assert('pero con pasos en medio no hay quietud y el hábito no mueve nada',

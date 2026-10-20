@@ -71,6 +71,36 @@ public class PostureTest {
     }
 
     @Test
+    public void elVigilanteSoloAceleraDeNocheConLaPostura() {
+        assertEquals(10 * 60_000L, SleepMonitorService.watchdogIntervalMs(true, true));
+        // De día no hay lecturas que hacer: no se despierta el móvil de más.
+        assertEquals(15 * 60_000L, SleepMonitorService.watchdogIntervalMs(true, false));
+        assertEquals(15 * 60_000L, SleepMonitorService.watchdogIntervalMs(false, true));
+        // Por encima de los nueve minutos entre alarmas en reposo de Android.
+        assertTrue(SleepMonitorService.watchdogIntervalMs(true, true) > 9 * 60_000L);
+    }
+
+    @Test
+    public void ventanaNocturnaQueCruzaMedianoche() {
+        int start = 21 * 60 + 30;
+        int end = 11 * 60;
+        assertTrue(SleepMonitorService.inNightWindow(start, end, 23 * 60));
+        assertTrue(SleepMonitorService.inNightWindow(start, end, 3 * 60));
+        assertFalse(SleepMonitorService.inNightWindow(start, end, 15 * 60));
+        // Ventana que no cruza medianoche (quien duerme de día).
+        assertTrue(SleepMonitorService.inNightWindow(8 * 60, 16 * 60, 12 * 60));
+        assertFalse(SleepMonitorService.inNightWindow(8 * 60, 16 * 60, 23 * 60));
+    }
+
+    @Test
+    public void laLecturaTrasApagarLaPantallaEsperaASoltarElMovil() {
+        // Ni tan corta que pille el móvil aún en la mano, ni tanto que se la
+        // salte el espaciado mínimo entre lecturas.
+        assertTrue(SensorWatcher.POSTURE_SETTLE_MS >= 30_000L);
+        assertTrue(SensorWatcher.POSTURE_SETTLE_MS < 4 * 60_000L);
+    }
+
+    @Test
     public void unVistazoReanudaElHuecoPeroUnUsoSostenidoNo() {
         assertTrue(SleepMonitorService.canResume("screen", 40_000L));
         assertTrue(SleepMonitorService.canResume("screen", 299_000L));

@@ -301,7 +301,7 @@ public class SleepMonitorService extends Service {
         // Cada rearme es también una oportunidad de darse cuenta de que la
         // señal de vuelta se perdió y el hueco lleva horas sin poder cerrarse.
         healStuckGap(System.currentTimeMillis());
-        // El vigilante pasa cada quince minutos (diez con el sensor de postura):
+        // El vigilante pasa cada quince minutos (diez de noche con el sensor de postura):
         // es un momento barato para preguntar por la alarma y el audio, y para
         // una lectura de postura, sin ningún temporizador propio.
         if (sensorWatcher != null) sensorWatcher.sample();
@@ -488,14 +488,27 @@ public class SleepMonitorService extends Service {
      * cada quince: es la cadencia de las lecturas, y dos seguidas en el bolsillo
      * o la mano son lo que cuenta como un rato despierto. Sigue por encima de
      * los nueve minutos que Android deja entre dos alarmas en reposo.
+     *
+     * Sólo de noche: fuera de la ventana nocturna no se toma ninguna lectura,
+     * y despertar el móvil cada diez minutos todo el día gastaba batería para
+     * nada. Se mira también la próxima pasada, para no llegar tarde a la
+     * primera lectura de la noche.
      */
     static long watchdogIntervalMs(Context context) {
         String sensors = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .getString(KEY_SENSORS, "");
+        boolean posture = false;
         for (String part : sensors.split(",")) {
-            if (part.trim().equals(SensorWatcher.POSTURE)) return POSTURE_WATCHDOG_INTERVAL_MS;
+            if (part.trim().equals(SensorWatcher.POSTURE)) posture = true;
         }
-        return WATCHDOG_INTERVAL_MS;
+        long now = System.currentTimeMillis();
+        boolean night = inNightWindow(context, now) || inNightWindow(context, now + WATCHDOG_INTERVAL_MS);
+        return watchdogIntervalMs(posture, night);
+    }
+
+    /** Lógica pura de {@link #watchdogIntervalMs(Context)}, para probarla sin dispositivo. */
+    static long watchdogIntervalMs(boolean postureActive, boolean nightSoon) {
+        return postureActive && nightSoon ? POSTURE_WATCHDOG_INTERVAL_MS : WATCHDOG_INTERVAL_MS;
     }
 
     /** Intervalo del vigilante con el sensor de postura activo. */
@@ -616,7 +629,7 @@ public class SleepMonitorService extends Service {
                 // cierra el hueco de la noche y éste es el principio de otro.
                 screenWentOff(now);
                 openGap(TRIGGER_SCREEN, now, true);
-                if (sensorWatcher != null) sensorWatcher.sample();
+                if (sensorWatcher != null) sensorWatcher.sample(true);
                 break;
 
             case Intent.ACTION_USER_PRESENT:
@@ -1335,7 +1348,12 @@ public class SleepMonitorService extends Service {
         Calendar cal = Calendar.getInstance();
         cal.setTimeInMillis(ts);
         int m = cal.get(Calendar.HOUR_OF_DAY) * 60 + cal.get(Calendar.MINUTE);
+        return inNightWindow(startMin, endMin, m);
+    }
 
+    /** Lógica pura de la ventana nocturna, en minutos del día. */
+    static boolean inNightWindow(int startMin, int endMin, int minuteOfDay) {
+        int m = minuteOfDay;
         // La ventana cruza medianoche cuando el fin es menor que el inicio.
         return startMin <= endMin ? (m >= startMin && m <= endMin) : (m >= startMin || m <= endMin);
     }

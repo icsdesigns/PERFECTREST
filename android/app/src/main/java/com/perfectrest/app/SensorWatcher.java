@@ -53,7 +53,8 @@ import java.util.Set;
  *   audio      si suena algo, consultado en esos mismos momentos.
  *   posture    postura del móvil con el acelerómetro, en lecturas puntuales: con
  *              la pantalla apagada y de noche, en cada rearme del vigilante
- *              (cada diez minutos con este sensor) se escucha el acelerómetro
+ *              (cada diez minutos con este sensor) y unos segundos después de
+ *              apagarse la pantalla, se escucha el acelerómetro
  *              unos dos segundos y se anota si el móvil está plano y quieto
  *              (sobre la mesa o la cama, boca arriba o abajo), inclinado y
  *              quieto (un soporte), o en el bolsillo o la mano (inclinado y con
@@ -87,6 +88,12 @@ final class SensorWatcher {
     private static final long POSTURE_MIN_SPACING_MS = 4 * 60_000L;
     /** El wakelock de la lectura se suelta solo aunque algo falle. */
     private static final long POSTURE_WAKELOCK_MS = 6_000L;
+    /**
+     * Espera tras apagarse la pantalla antes de leer: en ese instante el móvil
+     * casi siempre sigue en la mano camino de la mesilla, y la lectura saldría
+     * «en bolsillo o mano» cada vez que se mira la hora de madrugada.
+     */
+    static final long POSTURE_SETTLE_MS = 45_000L;
     /**
      * Umbrales sin calibrar con datos reales: ver «Limitaciones» en el README.
      * Inclinación máxima respecto a la horizontal para dar el móvil por plano.
@@ -130,6 +137,12 @@ final class SensorWatcher {
     private final float[] posY = new float[POSTURE_MAX_SAMPLES];
     private final float[] posZ = new float[POSTURE_MAX_SAMPLES];
     private int posN = 0;
+    /** Lectura aplazada tras apagarse la pantalla (ver {@link #POSTURE_SETTLE_MS}). */
+    private final Runnable settledReading = () -> {
+        if (active.contains(POSTURE)) samplePosture(System.currentTimeMillis());
+    };
+    /** Cierre de la lectura en curso cuando se agota su ventana. */
+    private final Runnable readingTimeout = () -> endPostureReading(true);
 
     private float lastStepCount = -1f;
     private int lastLightLevel = -1;
@@ -228,6 +241,7 @@ final class SensorWatcher {
                 lastProximity = -1;
                 break;
             case POSTURE:
+                postureHandler.removeCallbacks(settledReading);
                 endPostureReading(false);
                 break;
             default:
@@ -381,6 +395,17 @@ final class SensorWatcher {
      * servicio ya está despierto.
      */
     void sample() {
+        sample(false);
+    }
+
+    /**
+     * Como {@link #sample()}; con {@code screenJustOff} la lectura de postura se
+     * aplaza {@link #POSTURE_SETTLE_MS} para que el móvil llegue a soltarse. El
+     * aplazamiento no retiene el procesador: si se duerme antes, la lectura se
+     * hace en cuanto despierte (o la toma el vigilante) y vuelve a comprobar que
+     * la pantalla sigue apagada y que es de noche.
+     */
+    void sample(boolean screenJustOff) {
         long now = System.currentTimeMillis();
 
         if (active.contains(ALARM)) {
@@ -411,7 +436,14 @@ final class SensorWatcher {
             audioWasActive = playing;
         }
 
-        if (active.contains(POSTURE)) samplePosture(now);
+        if (active.contains(POSTURE)) {
+            if (screenJustOff) {
+                postureHandler.removeCallbacks(settledReading);
+                postureHandler.postDelayed(settledReading, POSTURE_SETTLE_MS);
+            } else {
+                samplePosture(now);
+            }
+        }
     }
 
     // --- Postura: lecturas puntuales del acelerómetro ---
@@ -471,12 +503,12 @@ final class SensorWatcher {
             releasePostureLock();
             return;
         }
-        postureHandler.postDelayed(() -> endPostureReading(true), POSTURE_WINDOW_MS);
+        postureHandler.postDelayed(readingTimeout, POSTURE_WINDOW_MS);
     }
 
     /** Cierra la lectura en curso; con {@code record}, clasifica y anota lo recogido. */
     private void endPostureReading(boolean record) {
-        postureHandler.removeCallbacksAndMessages(null);
+        postureHandler.removeCallbacks(readingTimeout);
         if (postureListener != null) {
             if (sensors != null) sensors.unregisterListener(postureListener);
             postureListener = null;

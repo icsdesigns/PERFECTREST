@@ -78,6 +78,9 @@ check('Hoja de sesión', <SessionSheet session={demo} onSave={() => {}} onClose=
   'Confirma esta noche',
   '7h 55m',
 ]);
+check('Hoja de sesión con inicio inferido',
+  <SessionSheet session={{ ...demo, confidence: 'low', inferred: true }} onSave={() => {}} onClose={() => {}} />,
+  ['Inicio sin medir']);
 
 console.log(failures === 0 ? '\nRENDER OK\n' : `\n${failures} FALLOS DE RENDER\n`);
 process.exit(failures === 0 ? 0 : 1);

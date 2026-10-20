@@ -116,6 +116,7 @@ export default function App() {
             start={pending.start}
             end={pending.end}
             confidence={pending.confidence}
+            inferred={!!pending.inferred}
           />
         )}
 
@@ -160,6 +161,7 @@ function PendingBanner({
   start,
   end,
   confidence,
+  inferred,
   onConfirm,
   onEdit,
   onDismiss,
@@ -167,6 +169,8 @@ function PendingBanner({
   start: number;
   end: number;
   confidence: 'high' | 'medium' | 'low';
+  /** El inicio no está medido: se dice, para que no se confirme a ciegas. */
+  inferred: boolean;
   onConfirm: () => void;
   onEdit: () => void;
   onDismiss: () => void;
@@ -186,6 +190,12 @@ function PendingBanner({
       <p style={{ fontSize: '0.82rem', color: 'var(--text-muted)', marginTop: 4 }}>
         De {formatClock(start)} a {formatClock(end)}. ¿Es correcto?
       </p>
+      {inferred && (
+        <p style={{ fontSize: '0.82rem', color: 'var(--text-muted)', marginTop: 4 }}>
+          La hora de dormirte no está medida: el móvil no sabe si dormías o
+          estabas despierto sin tocarlo. Ajústala si no es así.
+        </p>
+      )}
       <div className="pending__actions">
         <button className="btn btn--ghost" onClick={onDismiss}>No dormí</button>
         <button className="btn btn--ghost" onClick={onEdit}>Ajustar</button>

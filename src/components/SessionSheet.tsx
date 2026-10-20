@@ -46,6 +46,8 @@ export function SessionSheet({
       note: note.trim() || undefined,
       confirmed: true,
       source: session.source === 'auto' ? 'edited' : session.source,
+      // Revisada por ti: el inicio ya no es una deducción.
+      inferred: undefined,
     });
     onClose();
   };
@@ -92,6 +94,18 @@ export function SessionSheet({
               <div className="row__hint">Señales que marcaron el principio y el final</div>
             </div>
             <Pill tone="muted">{origin}</Pill>
+          </div>
+        )}
+
+        {session.inferred && (
+          <div className="row">
+            <div>
+              <div className="row__label">Inicio sin medir</div>
+              <div className="row__hint">
+                El móvil no sabe si a esa hora dormías o estabas despierto sin
+                tocarlo. Ajusta la hora de dormirte si no es así.
+              </div>
+            </div>
           </div>
         )}
 

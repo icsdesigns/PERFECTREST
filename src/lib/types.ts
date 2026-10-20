@@ -81,7 +81,9 @@ export type SensorId =
   /** Próxima alarma del reloj: cuándo se espera despertar. */
   | 'alarm'
   /** Audio sonando con la pantalla apagada: aún no se ha dormido. */
-  | 'audio';
+  | 'audio'
+  /** Postura del móvil (gravedad): plano y quieto sobre una superficie, o en bolsillo/mano. */
+  | 'posture';
 
 export interface MonitorSettings {
   enabled: boolean;
@@ -175,6 +177,14 @@ export interface SleepSession {
   detectedEnd?: number;
   /** Siesta aceptada por tener indicios propios; el resto de huecos de un día no se proponen. */
   nap?: boolean;
+  /**
+   * El inicio no está respaldado por una medida: se dedujo de tu hábito o del
+   * horario, o es el último uso del móvil muy por delante de tu hora de
+   * acostarte sin que ningún sensor confirme la quietud. Va siempre con
+   * confianza baja, no se guarda sola con «guardar sin preguntar» y cede ante
+   * cualquier otra propuesta de la misma noche.
+   */
+  inferred?: boolean;
   /** Valoración subjetiva del descanso, 1-5. */
   quality?: number;
   note?: string;

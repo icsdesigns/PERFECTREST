@@ -36,7 +36,12 @@ export type RawKind =
   /** Audio sonando (v: 1) o no (v: 0). */
   | 'audio'
   /** Próxima alarma del reloj (v = instante en que sonará; 0 si no hay). */
-  | 'alarm';
+  | 'alarm'
+  /**
+   * Postura del móvil en una lectura puntual con la pantalla apagada (v: ver
+   * `POSTURE_*`). Una línea por lectura, cada pocos minutos.
+   */
+  | 'posture';
 
 export interface RawEvent {
   at: number;
@@ -49,6 +54,14 @@ export const LIGHT_DARK = 0;
 export const LIGHT_DIM = 1;
 export const LIGHT_BRIGHT = 2;
 
+/** Posturas que registra el servicio a partir de la gravedad y el vaivén del acelerómetro. */
+export const POSTURE_FLAT_UP = 0;
+export const POSTURE_FLAT_DOWN = 1;
+/** En el bolsillo o la mano: inclinado y con vaivén. Quien lo lleva no está dormido. */
+export const POSTURE_CARRIED = 2;
+/** Inclinado pero quieto (un soporte, la mano firme): no dice ni sí ni no. */
+export const POSTURE_TILTED = 3;
+
 /** Qué sensor produce cada tipo de evento (los de pantalla, cargador… no tienen). */
 export const SENSOR_OF_KIND: Partial<Record<RawKind, SensorId>> = {
   steps: 'steps',
@@ -57,6 +70,7 @@ export const SENSOR_OF_KIND: Partial<Record<RawKind, SensorId>> = {
   proximity: 'proximity',
   audio: 'audio',
   alarm: 'alarm',
+  posture: 'posture',
 };
 
 /** Normaliza lo que devuelve el plugin: descarta basura y ordena por hora. */
@@ -92,6 +106,11 @@ export interface GapEvidence {
   dark: number | null;
   /** Episodios de actividad sostenida *dentro* de la noche (levantarse a andar). */
   moves: number | null;
+  /**
+   * Fracción (0-1) de las lecturas de postura del sueño estimado con el móvil
+   * plano y quieto; null sin lecturas (sensor apagado, ausente o sin datos).
+   */
+  flat: number | null;
   /** Hora de la alarma que sonó cerca del final, si la hubo. */
   alarmAt: number | null;
   /** ¿Hay alarma programada y cae cerca del final de la noche? null sin datos de alarma. */
@@ -105,6 +124,7 @@ export const NO_EVIDENCE: GapEvidence = {
   wakeAt: null,
   dark: null,
   moves: null,
+  flat: null,
   alarmAt: null,
   alarmMatch: null,
   sensors: [],
@@ -129,6 +149,14 @@ const EPISODE_MIN_MS = 8 * MINUTE;
 const EPISODE_MIN_WEIGHT = 6;
 /** Lo que se da por sonando a un audio detectado sin su evento de parada. */
 const AUDIO_HOLD_MS = 15 * MINUTE;
+/**
+ * Cada lectura de postura «en bolsillo/mano» cubre este tiempo —la mitad del
+ * espaciado entre lecturas— y pesa la mitad de lo que hace falta para contar
+ * como episodio: una sola lectura puede ser un golpe en la mesa o una ida al
+ * baño, dos seguidas son un rato con el móvil encima.
+ */
+const POSTURE_SPAN_MS = 5 * MINUTE;
+const POSTURE_WEIGHT = EPISODE_MIN_WEIGHT / 2;
 /** Un sueño nocturno no cabe en menos de esto: sirve para no cortar el hueco por el principio. */
 const MIN_SLEEP_MS = 4 * HOUR;
 
@@ -169,6 +197,10 @@ function episodes(events: RawEvent[], from: number, to: number, enabled: SensorI
       case 'proximity':
         if (has('proximity'))
           spans.push({ from: e.at, to: e.at + POINT_SPAN_MS / 2, weight: 1, light: false });
+        break;
+      case 'posture':
+        if (has('posture') && e.v === POSTURE_CARRIED)
+          spans.push({ from: e.at, to: e.at + POSTURE_SPAN_MS, weight: POSTURE_WEIGHT, light: false });
         break;
       case 'light':
         if (!has('light')) break;
@@ -286,9 +318,22 @@ export function gatherEvidence(
 
   // Quietud interior.
   const wakeBound = wakeAt ?? end;
-  const moves = used.has('steps') || used.has('proximity') || used.has('audio')
+  const moves = used.has('steps') || used.has('proximity') || used.has('audio') || used.has('posture')
     ? eps.filter((ep) => !ep.lightOnly && ep.from > sleepFrom && ep.from < wakeBound).length
     : null;
+
+  // Postura: cuánto del sueño estimado estuvo el móvil plano y quieto.
+  let flat: number | null = null;
+  if (enabled.includes('posture')) {
+    const readings = events.filter(
+      (e) => e.kind === 'posture' && e.at >= sleepFrom && e.at <= wakeBound,
+    );
+    if (readings.length) {
+      flat =
+        readings.filter((e) => e.v === POSTURE_FLAT_UP || e.v === POSTURE_FLAT_DOWN).length /
+        readings.length;
+    }
+  }
 
   // Oscuridad: el nivel de luz se mantiene hasta el evento siguiente.
   let dark: number | null = null;
@@ -314,8 +359,79 @@ export function gatherEvidence(
     wakeAt,
     dark,
     moves,
+    flat,
     alarmAt,
     alarmMatch,
     sensors: [...used],
   };
+}
+
+/**
+ * ¿Hay evidencia de que el móvil estuvo quieto, y no sólo sin usar?
+ *
+ * Es la condición para que tu hora habitual pueda mover el inicio de la noche:
+ * sin ella, «nadie ha tocado el móvil» puede ser dormir o puede ser estar
+ * despierto sin mirarlo, y el reloj no distingue una cosa de otra. Hace falta
+ * algún indicio a favor —el móvil plano y quieto, o a oscuras sin pasos— y
+ * ninguno en contra (pasos o movimiento sostenido, el móvil en el bolsillo o la
+ * mano).
+ */
+export function quietEvidence(ev: GapEvidence | null | undefined): boolean {
+  if (!ev) return false;
+  if (ev.moves !== null && ev.moves > 0) return false;
+  if (ev.flat !== null && ev.flat >= QUIET_FLAT_SHARE) return true;
+  return ev.dark !== null && ev.dark >= QUIET_DARK_SHARE && ev.moves === 0;
+}
+
+/** Fracción mínima de lecturas con el móvil plano para dar por quieta la noche. */
+const QUIET_FLAT_SHARE = 0.7;
+/** Fracción mínima del sueño a oscuras (con sensor de pasos o proximidad que confirme que no hay movimiento). */
+const QUIET_DARK_SHARE = 0.8;
+
+/** Uso del móvil que ya no es un vistazo: lo mismo que el servicio da por final de la noche. */
+const SUSTAINED_USE_MS = 5 * MINUTE;
+const SUSTAINED_UNLOCKS = 3;
+/** Dos usos separados por más de esto pertenecen a rachas distintas. */
+const USE_CLUSTER_GAP_MS = 20 * MINUTE;
+
+/**
+ * Fin del último uso sostenido del móvil dentro de un tramo, según el registro
+ * bruto de pantalla; null si no lo hubo.
+ *
+ * El servicio ya cierra el hueco de pantalla en cuanto el uso se sostiene (5
+ * minutos de pantalla o 3 desbloqueos en un rato), pero los huecos del cargador,
+ * de Doze o de «no molestar» no saben nada de eso y pueden abarcar un rato de
+ * móvil en la mano. Todo lo anterior al fin de ese uso no es sueño, y la noche
+ * empieza después, con su propio inicio.
+ */
+export function lastSustainedUse(events: RawEvent[], from: number, to: number): number | null {
+  const stints: Array<{ on: number; off: number }> = [];
+  let on: number | null = null;
+  for (const e of events) {
+    if (e.at < from || e.at > to) continue;
+    if (e.kind === 'screen-on') on ??= e.at;
+    else if (e.kind === 'screen-off' && on !== null) {
+      stints.push({ on, off: e.at });
+      on = null;
+    }
+  }
+  const unlocks = events.filter((e) => e.kind === 'unlock' && e.at >= from && e.at <= to).map((e) => e.at);
+
+  let last: number | null = null;
+  let cluster: Array<{ on: number; off: number }> = [];
+  const close = () => {
+    if (!cluster.length) return;
+    const first = cluster[0].on;
+    const end = cluster[cluster.length - 1].off;
+    const use = cluster.reduce((sum, s) => sum + (s.off - s.on), 0);
+    const count = unlocks.filter((u) => u >= first - 5_000 && u <= end).length;
+    if (use >= SUSTAINED_USE_MS || count >= SUSTAINED_UNLOCKS) last = end;
+    cluster = [];
+  };
+  for (const s of stints) {
+    if (cluster.length && s.on - cluster[cluster.length - 1].off > USE_CLUSTER_GAP_MS) close();
+    cluster.push(s);
+  }
+  close();
+  return last;
 }

@@ -141,11 +141,35 @@ apagados, no usan el micrófono y se degradan si falta el sensor o el permiso:
 | **Proximidad** | móvil tapado / libre (sólo la variante que no despierta el procesador) | actividad al cogerlo de nuevo; quietud |
 | **Próxima alarma** | `getNextAlarmClock`, sin permiso | si suena cerca del final, sube la confianza; con la pantalla encendida a esa hora, marca el despertar |
 | **Audio sonando** | `isMusicActive`, muestreado con el vigilante de 15 min | mientras suene aún no se ha dormido |
+| **Postura del móvil** | lecturas puntuales del acelerómetro: plano y quieto (boca arriba o abajo), inclinado y quieto, o en bolsillo/mano | plano y quieto es evidencia de quietud y sube la confianza; en bolsillo/mano aún no se duerme y el inicio se fija en el último momento así |
 
 Sin wakelocks permanentes: los sensores entregan en lotes de 10 minutos y la
 alarma y el audio sólo se consultan cuando el servicio ya está despierto. Todo
 va al **registro bruto** (un evento por línea), que se cruza con cada hueco y se
 exporta en CSV o JSON desde Ajustes, junto al historial.
+
+**Postura del móvil** ([`SensorWatcher.java`](android/app/src/main/java/com/perfectrest/app/SensorWatcher.java)).
+No deja ningún sensor escuchando: con la pantalla apagada y dentro de la ventana
+nocturna, cada rearme del vigilante (**cada 10 minutos** con este sensor activo
+en vez de 15, por encima de los 9 que Android deja entre dos alarmas en reposo)
+abre el acelerómetro unos 2,5 s, clasifica y lo cierra, con un wakelock de 6 s
+que se suelta solo. La clasificación mira la gravedad media (inclinación sobre
+la horizontal y qué cara mira arriba) y el vaivén (desviación típica de la
+aceleración): `0` plano boca arriba, `1` plano boca abajo, `2` en bolsillo o mano
+(con vaivén), `3` inclinado y quieto (un soporte; no cuenta ni a favor ni en
+contra). Una lectura suelta en el bolsillo no rompe la noche —puede ser una ida
+al baño o un golpe en la mesa—; dos seguidas son un rato despierto: mueven el
+inicio hasta el último momento con el móvil encima y, si ocurren tras cuatro
+horas de sueño, marcan el despertar. Si el móvil no tiene acelerómetro, Ajustes
+lo dice y el sensor no registra nada.
+
+*Sin calibrar.* Los umbrales (15° de inclinación, 0,35 m/s² de vaivén en plano,
+0,12 en inclinado, 70 % de lecturas planas para la quietud) son estimaciones
+razonables, no medidas: hay que comprobarlos con noches reales. Un colchón muy
+blando, un móvil apoyado en un soporte inclinado o un teléfono que vibra con
+cada notificación pueden dar lecturas que no son lo que parecen, y por eso una
+lectura aislada nunca mueve nada. Boca abajo la luz marca «oscuro» siempre, así
+que la oscuridad de ese sensor no se corrige por la postura.
 
 **Una noche no llega entera.** Ni el servicio ni la capa web pueden dar por
 buena la primera señal de vuelta que reciben, porque durante la noche llegan
@@ -176,12 +200,12 @@ confirmar, ajustar o descartar:
 
 - **fiable** — la puntuación combinada supera 0,7.
 - **estimada** — entre 0,45 y 0,7.
-- **dudosa** — por debajo de 0,45, demasiado corto, más largo que el máximo que fijes, o con el inicio deducido de tu hábito o del horario.
+- **dudosa** — por debajo de 0,45, demasiado corto, más largo que el máximo que fijes, o con el inicio **inferido** (ver «El reloj no inventa sueño»).
 
 La puntuación ya no mira sólo la duración y la hora: combina **duración**
 (6-10 h es lo más creíble), **cercanía a tu hora habitual** de acostarte y
 levantarte, **acuerdo entre disparadores independientes** y, si activas los
-sensores, **quietud**, **oscuridad** y **coincidencia con la alarma**. Las
+sensores, **quietud** (pasos, movimiento y postura: móvil plano y quieto), **oscuridad** y **coincidencia con la alarma**. Las
 evidencias que faltan no puntúan ni a favor ni en contra.
 
 **Afinar el inicio y el final** ([`src/lib/activityMonitor.ts`](src/lib/activityMonitor.ts)).
@@ -201,16 +225,50 @@ hace ahora:
   independientes, o sensores con oscuridad y quietud).
 - **Techo de 13 h.** Un hueco mayor suele ser una tarde despierto más la noche:
   se parte por el micro-despertar que deja una noche creíble junto a tu hora de
-  acostarte, y si no lo hay la noche empieza a tu hora habitual con confianza
-  baja. Si esa hora no cae dentro del hueco no hay noche que proponer.
+  acostarte, o por la última actividad que vieron los sensores. Si no hay nada de
+  eso, la noche se coloca a tu hora habitual como un **marcador inferido**
+  (confianza baja, ver más abajo). Si esa hora no cae dentro del hueco no hay
+  noche que proponer.
 - **Aprendizaje ligero** ([`src/lib/habit.ts`](src/lib/habit.ts)). De las noches
   que corriges —editando la hora, escribiendo «me acosté a las 00:30» en el
   comentario o diciendo «correcto» o «es un margen aceptable»— se aprende tu
   hora de acostarte y levantarte, cuánto varía de una noche a otra y tu latencia
   de sueño (también de las noches que das por buenas, no sólo de las que
-  corriges). Un inicio muy anterior a tu hora habitual se adelanta hasta ella,
-  menos lo que sueles variar (entre 20 min y 1 h), para no llevar a la media
-  una noche en que de verdad te acostaste pronto.
+  corriges). Un inicio muy anterior a tu hora habitual **sólo** se adelanta
+  hasta ella, menos lo que sueles variar (entre 20 min y 1 h), cuando hay
+  evidencia de quietud (ver abajo); sin ella el hábito no toca el inicio.
+
+**El reloj no inventa sueño.** «Nadie ha tocado el móvil» puede ser dormir o
+estar despierto sin mirarlo, y la hora no distingue una cosa de otra. Antes, un
+hueco largo sin micro-despertares empezaba la noche a tu hora habitual y un
+inicio medido muy anterior a ella se adelantaba hasta el hábito: sueño deducido
+por el reloj. Ahora:
+
+- **El inicio nunca va antes del último uso real del móvil.** Ningún ajuste lo
+  adelanta: sólo lo retrasan la latencia, la última actividad de un sensor, un
+  micro-despertar real o el fin de un uso sostenido.
+- **La hora habitual sólo mueve el inicio con evidencia de quietud**
+  ([`quietEvidence`](src/lib/rawEvents.ts)): el móvil plano y quieto durante al
+  menos el 70 % de las lecturas, o la noche a oscuras (80 %) sin pasos ni
+  movimiento, y nada en contra (pasos, móvil en el bolsillo o la mano).
+- **Sin evidencia la propuesta queda como dudosa**: confianza baja y marcada
+  `inferred`. Una sesión inferida no se guarda sola con «guardar sin preguntar»
+  —se queda en la cola para que la corrijas—, puntúa siempre por debajo de
+  cualquier propuesta medida de su misma noche (no es noche principal por
+  defecto ni bloquea a las demás) y la sustituye cualquier propuesta medida que
+  llegue después. Son inferidas: la noche colocada a la hora habitual en un hueco
+  de más de 13 h sin datos, el último uso del móvil más de 90 min anterior a tu
+  hora de acostarte sin evidencia de quietud (con hábito aprendido) y la propuesta
+  del disparador de horario, que sigue siendo el último recurso.
+- **Un uso sostenido corta lo anterior.** El servicio sólo cierra el hueco de
+  pantalla cuando el uso se sostiene (5 min de pantalla o 3 desbloqueos), y ya no
+  lo *reanuda* si el móvil estuvo encendido ese rato: antes, doce minutos de móvil
+  a las 22:30 tras soltarlo a las 22:00 devolvían el inicio a las 22:00. En la
+  capa web, los huecos del cargador, de Doze o de «no molestar» que abarquen un
+  uso sostenido (según el registro de pantalla) empiezan donde termina; y dos
+  huecos de pantalla separados por uno ya no se funden salvo que el primero sea
+  un desvelo en mitad de la noche. Lo posterior abre un ciclo nuevo con su
+  propio inicio.
 
 Las propuestas se guardan en **cola**, no de una en una: quien pasa un fin de
 semana sin abrir la app vuelve con tres noches que confirmar, y antes la última
@@ -288,11 +346,13 @@ martes 07:10 es «la noche del martes».
   medianoche, medias circulares, estadísticas y detección de huecos de
   inactividad, y el formato de las etiquetas de release.
 - **Noches simuladas** ([`scripts/nightsim.ts`](scripts/nightsim.ts)) — una noche
-  entera, del evento de Android a la sesión propuesta.
+  entera, del evento de Android a la sesión propuesta; incluye la reanudación de
+  huecos tras un uso sostenido y la noche que sigue a una tarde quieta.
 - **Precisión** ([`scripts/precisioncheck.ts`](scripts/precisioncheck.ts)) — la
   lectura de los comentarios con la hora real, el hábito y la latencia
   aprendidos, la noche principal por día, los micro-despertares, la confianza
-  combinada y los sensores.
+  combinada, los sensores —con la postura del móvil—, el inicio dudoso sin
+  evidencia de quietud y el corte por uso sostenido.
 - **Banco de pruebas** ([`scripts/backtest.ts`](scripts/backtest.ts)) — carga un
   historial real con comentarios («me acosté a las 00:30», «correcto», «no he
   dormido»), reconstruye el hueco bruto de cada sesión y lo hace pasar de nuevo
@@ -301,6 +361,13 @@ martes 07:10 es «la noche del martes».
   (`scripts/fixtures/sueno-etiquetado.json`); con
   `PERFECTREST_LABELED=/ruta/historial.json npm run check` (y
   `PERFECTREST_VERBOSE=1` para el detalle noche a noche) se lanza con tus datos.
+  Además del error medio, separa las propuestas **dudosas** (inicio inferido) de
+  las firmes: lo que el reloj ya no deduce no desaparece, se marca. Con el
+  historial real de referencia, el error medio de inicio en línea pasó de 23 a
+  32 min (mediana 8 → 11 min) al dejar de adelantar el inicio al hábito sin
+  evidencia: 6 de las 18 noches etiquetadas salen dudosas, y las 12 firmes
+  quedan a 16 min de media (7 min con el hábito ya aprendido). Con sensores de
+  quietud, el hábito vuelve a poder mover el inicio.
 - **Render** ([`scripts/rendercheck.tsx`](scripts/rendercheck.tsx)) — cada
   pantalla se renderiza fuera del navegador para detectar errores de render.
 
@@ -321,6 +388,14 @@ así que se ha reescrito en TypeScript dentro de la suite. Cada regla que debe
 coincidir línea por línea con el Java lleva un comentario `SPEC:` con el nombre
 del método original; si se toca `openGap` o `closeGap` en el servicio, hay que
 tocarlos también aquí o la simulación deja de demostrar nada.
+
+La lógica pura del servicio que tiene reglas propias en Java —la clasificación
+de la postura a partir de una ráfaga del acelerómetro y cuándo se reanuda un
+hueco— se prueba con JUnit
+([`PostureTest.java`](android/app/src/test/java/com/perfectrest/app/PostureTest.java),
+`gradlew testDebugUnitTest`); sin Gradle se puede compilar con `javac` contra el
+`android-all` de Robolectric (Maven Central, API 34) y stubs mínimos de
+Capacitor y AndroidX, y ejecutar con `JUnitCore`.
 
 Además, con el servidor de desarrollo en marcha:
 

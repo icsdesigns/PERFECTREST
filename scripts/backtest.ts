@@ -143,6 +143,7 @@ function replay(mode: Mode): Outcome[] {
     const refined = refineEdges(mine.session, LATENCY, {
       learnedLatencyMinutes: learnLatency(learnFrom),
       habit,
+      evidence: mine.evidence,
     });
     known.push(refined);
     outcomes.push({ session: refined });

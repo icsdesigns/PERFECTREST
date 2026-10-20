@@ -14,13 +14,27 @@ import {
   MAX_PLAUSIBLE_SLEEP_MS,
   evaluateGap,
   evaluateGaps,
+  proposeFromSchedule,
   refineEdges,
   supersedesPending,
 } from '../src/lib/activityMonitor';
 import type { NativeGap } from '../src/lib/backgroundMonitor';
 import { learnHabit, learnLatency, circularMean, circularSpread, minuteDiff } from '../src/lib/habit';
 import { parseNote } from '../src/lib/noteTimes';
-import { LIGHT_BRIGHT, LIGHT_DARK, gatherEvidence, type RawEvent } from '../src/lib/rawEvents';
+import {
+  LIGHT_BRIGHT,
+  LIGHT_DARK,
+  NO_EVIDENCE,
+  POSTURE_CARRIED,
+  POSTURE_FLAT_DOWN,
+  POSTURE_FLAT_UP,
+  POSTURE_TILTED,
+  gatherEvidence,
+  lastSustainedUse,
+  quietEvidence,
+  type GapEvidence,
+  type RawEvent,
+} from '../src/lib/rawEvents';
 import { DEFAULT_SENSORS, activeSensors } from '../src/lib/sensors';
 import { DEFAULT_GOALS } from '../src/lib/schedule';
 import { DEFAULT_TRIGGERS } from '../src/lib/triggers';
@@ -300,9 +314,22 @@ console.log('\n--- Precisión: confianza por evidencias ---');
   assert('y un hueco suelto de 13h30 pasa del techo y no se propone', strange === null);
 
   const moved: SleepSession = { ...earlyStart.session };
-  const refined = refineEdges(moved, 15, { habit });
-  assert('con hábito aprendido, un inicio muy anterior a tu hora se adelanta hasta ella',
+  // Móvil plano y quieto toda la noche: ahora sí hay evidencia de quietud.
+  const QUIET: GapEvidence = { ...NO_EVIDENCE, flat: 1, moves: 0, sensors: ['posture'] };
+  const refined = refineEdges(moved, 15, { habit, evidence: QUIET });
+  assert('con hábito aprendido y evidencia de quietud, un inicio muy anterior a tu hora se adelanta hasta ella',
     clock(refined.start) === '23:10', clock(refined.start));
+  const unverified = refineEdges(moved, 15, { habit });
+  assert('sin evidencia de quietud el hábito no mueve el inicio: queda en el último uso más la latencia',
+    unverified.start === moved.start + 15 * MINUTE, clock(unverified.start));
+  assert('y la sesión queda dudosa: confianza baja y marcada como inferida',
+    unverified.confidence === 'low' && unverified.inferred === true, [unverified.confidence, unverified.inferred]);
+  assert('un inicio sólo algo anterior a tu hora no se marca dudoso',
+    refineEdges(ideal.session, 15, { habit }).inferred === undefined);
+  assert('la oscuridad sin pasos también cuenta como quietud',
+    clock(refineEdges(moved, 15, { habit, evidence: { ...NO_EVIDENCE, dark: 0.95, moves: 0, sensors: ['light', 'steps'] } }).start) === '23:10');
+  assert('pero con pasos en medio no hay quietud y el hábito no mueve nada',
+    refineEdges(moved, 15, { habit, evidence: { ...QUIET, moves: 2 } }).start === moved.start + 15 * MINUTE);
   assert('sin hábito aprendido no se mueve más que la latencia',
     refineEdges(moved, 15, { habit: { ...habit, n: 2 } }).start === moved.start + 15 * MINUTE);
   assert('un inicio ya cercano a tu hora sólo suma la latencia',
@@ -313,14 +340,14 @@ console.log('\n--- Precisión: confianza por evidencias ---');
   // suele variar (aquí 50 min), y una noche en que se acostó pronto de verdad
   // queda más cerca de lo medido.
   assert('con un hábito muy variable, el inicio se adelanta menos',
-    clock(refineEdges(moved, 15, { habit: { ...habit, spreadMin: 50 } }).start) === '22:40',
-    clock(refineEdges(moved, 15, { habit: { ...habit, spreadMin: 50 } }).start));
+    clock(refineEdges(moved, 15, { habit: { ...habit, spreadMin: 50 }, evidence: QUIET }).start) === '22:40',
+    clock(refineEdges(moved, 15, { habit: { ...habit, spreadMin: 50 }, evidence: QUIET }).start));
   assert('y el margen nunca pasa de una hora',
-    clock(refineEdges(moved, 15, { habit: { ...habit, spreadMin: 300 } }).start) === '22:30');
+    clock(refineEdges(moved, 15, { habit: { ...habit, spreadMin: 300 }, evidence: QUIET }).start) === '22:30');
   assert('la dispersión circular de 23:40 y 00:20 es de unos 20 min',
     Math.abs(circularSpread([23 * 60 + 40, 20]) - 20) < 1, circularSpread([23 * 60 + 40, 20]));
   assert('el hábito no acerca el inicio si deja una noche de menos de 3h',
-    refineEdges({ ...moved, end: moved.start + 4 * HOUR }, 15, { habit }).start === moved.start + 15 * MINUTE);
+    refineEdges({ ...moved, end: moved.start + 4 * HOUR }, 15, { habit, evidence: QUIET }).start === moved.start + 15 * MINUTE);
 }
 
 // --- Micro-despertares ------------------------------------------------------
@@ -367,10 +394,12 @@ console.log('\n--- Precisión: micro-despertares ---');
     afternoonThenNight.results.length === 1 && clock(afternoonThenNight.results[0].session.start) === '23:55',
     afternoonThenNight.results.map((r) => formatDuration(r.gapMs)));
   const inferred = evaluateGaps([gap('2026-09-21T17:00:00', '2026-09-22T09:00:00')], MON, { habit });
-  assert('y sin micro-despertares la noche empieza a tu hora de acostarte, con confianza baja',
+  assert('y sin micro-despertares la noche empieza a tu hora de acostarte, dudosa: confianza baja e inferida',
     inferred.results.length === 1 &&
       clock(inferred.results[0].session.start) === '23:40' &&
-      inferred.results[0].session.confidence === 'low',
+      inferred.results[0].session.confidence === 'low' &&
+      inferred.results[0].session.inferred === true &&
+      inferred.results[0].inferred === true,
     inferred.results.map((r) => `${clock(r.session.start)} ${r.session.confidence}`));
   // Que el cargador coincida no convierte en medido un inicio deducido.
   const inferredPlusCharger = evaluateGaps(
@@ -493,6 +522,262 @@ console.log('\n--- Precisión: sensores ---');
   assert('una siesta a oscuras y quieta se acepta como siesta',
     two.results.length === 2 && !!two.results[1].session.nap,
     two.results.map((x) => `${clock(x.session.start)} ${x.session.nap}`));
+}
+
+// --- Postura del móvil ------------------------------------------------------
+
+console.log('\n--- Precisión: postura del móvil ---');
+{
+  const on = (...ids: Array<keyof typeof DEFAULT_SENSORS>) => ({
+    ...MON,
+    sensors: { ...DEFAULT_SENSORS, ...Object.fromEntries(ids.map((i) => [i, true])) },
+  });
+  const habit = { startMin: 0, endMin: 8 * 60, n: 8 };
+  /** Una lectura cada 10 min entre dos instantes, todas con la misma postura. */
+  const readings = (from: string, to: string, v: number): RawEvent[] => {
+    const out: RawEvent[] = [];
+    for (let t = at(from); t <= at(to); t += 10 * MINUTE) out.push({ at: t, kind: 'posture', v });
+    return out;
+  };
+
+  // En el bolsillo o la mano hasta las 23:50; luego plano toda la noche.
+  const night: RawEvent[] = [
+    ...readings('2026-09-21T22:10:00', '2026-09-21T23:50:00', POSTURE_CARRIED),
+    ...readings('2026-09-22T00:00:00', '2026-09-22T08:50:00', POSTURE_FLAT_UP),
+  ];
+  const from = at('2026-09-21T22:10:00');
+  const to = at('2026-09-22T09:10:00');
+  const ev = gatherEvidence(night, from, to, ['posture']);
+  assert('el inicio se fija en el último momento con el móvil en el bolsillo o la mano',
+    ev.activityAt !== null && clock(ev.activityAt) === '23:55', ev.activityAt && clock(ev.activityAt));
+  assert('plano toda la noche: el 100 % de las lecturas', ev.flat === 1, ev.flat);
+  assert('y sin episodios de movimiento dentro de la noche', ev.moves === 0, ev.moves);
+  assert('el sensor consta como usado', ev.sensors.length === 1 && ev.sensors[0] === 'posture');
+  assert('plano y quieto es evidencia de quietud', quietEvidence(ev));
+
+  const flatDown = gatherEvidence(readings('2026-09-22T00:00:00', '2026-09-22T08:50:00', POSTURE_FLAT_DOWN), from, to, ['posture']);
+  assert('boca abajo también es plano y quieto', flatDown.flat === 1 && quietEvidence(flatDown), flatDown.flat);
+  const tilted = gatherEvidence(readings('2026-09-22T00:00:00', '2026-09-22T08:50:00', POSTURE_TILTED), from, to, ['posture']);
+  assert('inclinado y quieto (un soporte) no es evidencia ni a favor ni en contra',
+    tilted.flat === 0 && !quietEvidence(tilted) && tilted.moves === 0, [tilted.flat, tilted.moves]);
+
+  // Una sola lectura de movimiento a las 03:00 (ir al baño, un golpe en la mesa)
+  // no parte la noche; dos seguidas a las 06:30 sí son levantarse.
+  const bathroom = [
+    ...night,
+    { at: at('2026-09-22T03:00:00'), kind: 'posture', v: POSTURE_CARRIED } as RawEvent,
+  ];
+  const evBath = gatherEvidence(bathroom, from, to, ['posture']);
+  assert('una lectura suelta en el bolsillo de madrugada no rompe la noche',
+    evBath.moves === 0 && evBath.wakeAt === null && quietEvidence(evBath), [evBath.moves, evBath.wakeAt]);
+  const upEarly = [
+    ...night,
+    { at: at('2026-09-22T06:30:00'), kind: 'posture', v: POSTURE_CARRIED } as RawEvent,
+    { at: at('2026-09-22T06:40:00'), kind: 'posture', v: POSTURE_CARRIED } as RawEvent,
+  ];
+  const evUp = gatherEvidence(upEarly, from, to, ['posture']);
+  assert('dos lecturas seguidas en el bolsillo o la mano son un despertar',
+    evUp.wakeAt !== null && clock(evUp.wakeAt) === '06:30', evUp.wakeAt && clock(evUp.wakeAt));
+  assert('y la noche termina ahí: lo anterior fue quieto', evUp.moves === 0 && quietEvidence(evUp), [evUp.moves, evUp.flat]);
+
+  // Con el sensor apagado en ajustes, las lecturas del registro se ignoran.
+  const off = gatherEvidence(night, from, to, ['steps']);
+  assert('con el sensor apagado las lecturas no cuentan', off.flat === null && off.activityAt === null && off.sensors.length === 0);
+  // Degradación: activo pero sin lecturas (móvil sin acelerómetro, servicio sin datos).
+  const none = gatherEvidence([{ at: at('2026-09-22T01:00:00'), kind: 'screen-off' }], from, to, ['posture']);
+  assert('activo pero sin lecturas no hay indicio, ni a favor ni en contra', none.flat === null && !quietEvidence(none));
+
+  // En la tubería: la postura fija el inicio y sube la confianza.
+  const withPosture = evaluateGaps([gap('2026-09-21T22:10:00', '2026-09-22T09:10:00')], on('posture'), { habit, events: night });
+  const without = evaluateGaps([gap('2026-09-21T22:10:00', '2026-09-22T09:10:00')], MON, { habit, events: night });
+  assert('con el sensor activo el inicio es la última lectura en el bolsillo o la mano',
+    withPosture.results.length === 1 && clock(withPosture.results[0].session.start) === '23:55',
+    withPosture.results.map((r) => clock(r.session.start)));
+  assert('con el sensor apagado se queda el último uso del móvil',
+    without.results.length === 1 && clock(without.results[0].session.start) === '22:10');
+  assert('plano y quieto sube la puntuación respecto a la misma noche sin él',
+    (withPosture.results[0].score ?? 0) > (without.results[0].score ?? 1),
+    [withPosture.results[0].score, without.results[0].score]);
+  // Un rato con el móvil en la mano a las 02:00 es seguir despierto: el inicio
+  // se fija al final de ese rato, no en el primer paseo con él de la noche.
+  const restless = evaluateGaps(
+    [gap('2026-09-21T22:10:00', '2026-09-22T09:10:00')],
+    on('posture'),
+    {
+      habit,
+      events: [
+        ...readings('2026-09-21T22:10:00', '2026-09-21T23:50:00', POSTURE_CARRIED),
+        ...readings('2026-09-22T00:00:00', '2026-09-22T01:30:00', POSTURE_FLAT_UP),
+        ...readings('2026-09-22T01:40:00', '2026-09-22T02:10:00', POSTURE_CARRIED),
+        ...readings('2026-09-22T02:20:00', '2026-09-22T08:50:00', POSTURE_FLAT_UP),
+      ],
+    },
+  );
+  assert('un rato con el móvil en la mano a las 02:00 mueve el inicio a cuando lo soltó',
+    restless.results.length === 1 && clock(restless.results[0].session.start) === '02:15',
+    restless.results.map((r) => clock(r.session.start)));
+}
+
+// --- No deducir el sueño por la hora ---------------------------------------
+
+console.log('\n--- Precisión: el reloj no inventa sueño ---');
+{
+  const on = (...ids: Array<keyof typeof DEFAULT_SENSORS>) => ({
+    ...MON,
+    sensors: { ...DEFAULT_SENSORS, ...Object.fromEntries(ids.map((i) => [i, true])) },
+  });
+  const habit = { startMin: 0, endMin: 8 * 60, n: 8 };
+  const readings = (from: string, to: string, v: number): RawEvent[] => {
+    const out: RawEvent[] = [];
+    for (let t = at(from); t <= at(to); t += 10 * MINUTE) out.push({ at: t, kind: 'posture', v });
+    return out;
+  };
+
+  // Un hueco largo sin nada con que partirlo: la noche a la hora habitual es
+  // sólo un marcador, y lo dice.
+  const longGap = gap('2026-09-21T17:00:00', '2026-09-22T09:00:00');
+  const bare = evaluateGaps([longGap], MON, { habit });
+  const r0 = bare.results[0];
+  assert('sin evidencia, el inicio por hábito sale inferido y de confianza baja',
+    bare.results.length === 1 && r0.inferred === true && r0.session.inferred === true && r0.session.confidence === 'low');
+  assert('y nunca antes del último uso real del móvil', r0.session.start >= longGap.start);
+
+  // Con el móvil plano toda la noche desde la hora habitual, la quietud sostiene la hora.
+  const flatNight = readings('2026-09-21T23:40:00', '2026-09-22T08:50:00', POSTURE_FLAT_UP);
+  const backed = evaluateGaps([longGap], on('posture'), { habit, events: flatNight });
+  assert('con el móvil plano y quieto, la hora habitual deja de ser una deducción',
+    backed.results.length === 1 && !backed.results[0].inferred && !backed.results[0].session.inferred &&
+      clock(backed.results[0].session.start) === '23:40',
+    backed.results.map((r) => `${clock(r.session.start)} ${r.inferred}`));
+  assert('y la confianza ya no está limitada a baja', backed.results[0].session.confidence !== 'low',
+    backed.results[0].session.confidence);
+
+  // Si los sensores vieron la última actividad, ese es el inicio medido y el reloj sobra.
+  const walked: RawEvent[] = [
+    ...readings('2026-09-21T17:00:00', '2026-09-21T22:30:00', POSTURE_CARRIED),
+    ...readings('2026-09-21T22:40:00', '2026-09-22T08:50:00', POSTURE_FLAT_UP),
+  ];
+  const measured = evaluateGaps([longGap], on('posture'), { habit, events: walked });
+  assert('la última actividad vista por el sensor manda sobre la hora habitual',
+    measured.results.length === 1 && clock(measured.results[0].session.start) === '22:35' && !measured.results[0].inferred,
+    measured.results.map((r) => `${clock(r.session.start)} ${r.inferred}`));
+
+  // Un inicio muy anterior a tu hora, sin evidencia: dudoso, no corregido por reloj.
+  const early = evaluateGaps([gap('2026-09-21T21:40:00', '2026-09-22T08:30:00')], MON, { habit });
+  assert('un último uso del móvil muy anterior a tu hora, sin evidencia, se propone dudoso',
+    early.results.length === 1 && early.results[0].inferred === true && early.results[0].session.confidence === 'low' &&
+      clock(early.results[0].session.start) === '21:40',
+    early.results.map((r) => `${clock(r.session.start)} ${r.session.confidence}`));
+  const earlyQuiet = evaluateGaps(
+    [gap('2026-09-21T21:40:00', '2026-09-22T08:30:00')],
+    on('posture'),
+    { habit, events: readings('2026-09-21T21:50:00', '2026-09-22T08:20:00', POSTURE_FLAT_UP) },
+  );
+  assert('con el móvil plano y quieto desde entonces no hay nada dudoso: se durmió pronto',
+    earlyQuiet.results.length === 1 && !earlyQuiet.results[0].inferred, earlyQuiet.results.map((r) => r.inferred));
+
+  // El inicio de una sesión nunca retrocede, con o sin hábito, con o sin evidencia.
+  const base: SleepSession = {
+    id: 'auto-x', start: at('2026-09-21T20:30:00'), end: at('2026-09-22T07:30:00'),
+    source: 'auto', confidence: 'medium', confirmed: false,
+  };
+  const never = [undefined, habit, { ...habit, spreadMin: 90 }].every((h) =>
+    [null, { ...NO_EVIDENCE, flat: 1, moves: 0 } as GapEvidence].every(
+      (e) => refineEdges(base, 15, { habit: h, evidence: e }).start >= base.start,
+    ));
+  assert('refineEdges nunca adelanta el inicio antes del último uso del móvil', never);
+
+  // Dos propuestas de la misma noche: la deducida no desplaza a la medida.
+  const firm = { start: at('2026-09-21T23:50:00'), end: at('2026-09-22T07:30:00'), rank: 0.8 };
+  const against = evaluateGaps([longGap], MON, { habit, known: [firm] });
+  assert('una noche deducida no tapa a una medida que ya espera en la cola',
+    against.results.length === 0 && against.rejected[0]?.reason === 'secondary', against.rejected.map((r) => r.reason));
+  const incomingLow = evaluateGaps(
+    [gap('2026-09-21T23:00:00', '2026-09-22T07:30:00')],
+    MON,
+    { habit, known: [{ start: r0.session.start, end: r0.session.end, rank: 0.3 + 8 / 40 - 0.5 }] },
+  );
+  assert('y cualquier noche medida desplaza a la deducida que esperaba', incomingLow.results.length === 1);
+  const pendingInferred: SleepSession = { ...r0.session, id: 'pending' };
+  const incomingSolid: SleepSession = {
+    id: 'auto-new', start: at('2026-09-21T23:10:00'), end: at('2026-09-22T07:00:00'),
+    source: 'auto', confidence: 'low', confirmed: false,
+  };
+  assert('una propuesta medida, aunque sea baja, sustituye a la inferida de su noche en la cola',
+    supersedesPending(incomingSolid, pendingInferred));
+  assert('pero una inferida no sustituye a otra medida de confianza baja',
+    !supersedesPending(pendingInferred, incomingSolid));
+
+  // El disparador de horario sigue siendo el último recurso: baja e inferida.
+  const sched = proposeFromSchedule(
+    flat,
+    { ...MON, triggers: { ...DEFAULT_TRIGGERS, schedule: true } },
+    [],
+    null,
+    at('2026-09-22T12:00:00'),
+  );
+  assert('la propuesta del horario es de confianza baja y se marca inferida',
+    !!sched && sched.result.session.confidence === 'low' && sched.result.session.inferred === true && sched.result.inferred === true);
+}
+
+// --- Uso sostenido del móvil dentro de un hueco -----------------------------
+
+console.log('\n--- Precisión: el uso sostenido corta el hueco ---');
+{
+  const habit = { startMin: 0, endMin: 8 * 60, n: 8 };
+  const e = (iso: string, kind: RawEvent['kind']): RawEvent => ({ at: at(iso), kind });
+  const from = at('2026-09-21T21:00:00');
+  const to = at('2026-09-22T07:30:00');
+
+  const long: RawEvent[] = [e('2026-09-21T21:30:00', 'screen-on'), e('2026-09-21T21:30:02', 'unlock'), e('2026-09-21T22:10:00', 'screen-off')];
+  const used = lastSustainedUse(long, from, to);
+  assert('40 minutos de pantalla son un uso sostenido que termina al apagarse', used !== null && clock(used) === '22:10', used && clock(used));
+  assert('un vistazo de dos minutos no lo es',
+    lastSustainedUse([e('2026-09-22T03:00:00', 'screen-on'), e('2026-09-22T03:02:00', 'screen-off')], from, to) === null);
+  assert('varios vistazos seguidos suman uso: 6 minutos en total sí lo son',
+    lastSustainedUse([
+      e('2026-09-22T03:00:00', 'screen-on'), e('2026-09-22T03:03:00', 'screen-off'),
+      e('2026-09-22T03:10:00', 'screen-on'), e('2026-09-22T03:13:00', 'screen-off'),
+    ], from, to) === at('2026-09-22T03:13:00'));
+  assert('tres desbloqueos en un rato son sostenido aunque sean de segundos',
+    lastSustainedUse([
+      e('2026-09-22T03:00:00', 'screen-on'), e('2026-09-22T03:00:01', 'unlock'), e('2026-09-22T03:00:20', 'screen-off'),
+      e('2026-09-22T03:05:00', 'screen-on'), e('2026-09-22T03:05:01', 'unlock'), e('2026-09-22T03:05:20', 'screen-off'),
+      e('2026-09-22T03:10:00', 'screen-on'), e('2026-09-22T03:10:01', 'unlock'), e('2026-09-22T03:10:20', 'screen-off'),
+    ], from, to) === at('2026-09-22T03:10:20'));
+  assert('el último de varios usos sostenidos manda',
+    lastSustainedUse([...long, e('2026-09-21T23:00:00', 'screen-on'), e('2026-09-21T23:20:00', 'screen-off')], from, to) === at('2026-09-21T23:20:00'));
+
+  // Un hueco del cargador abarca un rato de móvil en la mano: la noche empieza después.
+  const charger = { ...MON, triggers: { ...DEFAULT_TRIGGERS, charger: true } };
+  const cg = gap('2026-09-21T21:00:00', '2026-09-22T07:30:00', { startTrigger: 'charger', endTrigger: 'charger' });
+  const cut = evaluateGaps([cg], charger, { habit, events: long });
+  assert('el inicio de un hueco del cargador no va antes del último uso sostenido del móvil',
+    cut.results.length === 1 && clock(cut.results[0].session.start) === '22:10',
+    cut.results.map((r) => clock(r.session.start)));
+  const glance = evaluateGaps([cg], charger, {
+    habit, events: [e('2026-09-21T22:00:00', 'screen-on'), e('2026-09-21T22:01:00', 'screen-off')],
+  });
+  assert('un vistazo breve no mueve el inicio', glance.results.length === 1 && clock(glance.results[0].session.start) === '21:00');
+  // Si lo que queda tras el uso ya no es una noche, todo el hueco se descarta como sueño.
+  const tail = evaluateGaps([gap('2026-09-21T19:00:00', '2026-09-22T00:30:00', { startTrigger: 'charger', endTrigger: 'charger' })], charger, {
+    habit,
+    events: [e('2026-09-21T19:10:00', 'screen-on'), e('2026-09-21T22:30:00', 'screen-off')],
+  });
+  assert('y si tras el uso no queda una noche, el hueco entero deja de ser sueño',
+    tail.results.length === 0 && tail.rejected.length === 1, tail.rejected.map((r) => r.reason));
+
+  // Tarde sin tocar el móvil + 12 min de uso + noche: dos ciclos, cada uno con su inicio.
+  const afternoon = gap('2026-09-21T14:30:00', '2026-09-21T22:30:00');
+  const nightGap = gap('2026-09-21T22:42:00', '2026-09-22T07:00:00');
+  const two = evaluateGaps([afternoon, nightGap], MON, { habit });
+  const night = two.results.find((r) => r.session.end === nightGap.end);
+  assert('tras un uso sostenido la noche abre un ciclo nuevo con su propio inicio, sin pegarse a la tarde',
+    !!night && night.session.detectedStart === nightGap.start && night.session.start >= nightGap.start &&
+      !night.inferred && night.session.end - night.session.start < 9 * HOUR,
+    two.results.map((r) => `${clock(r.session.start)}→${clock(r.session.end)} ${r.inferred}`));
+  assert('la tarde no se funde con la noche ni la bloquea',
+    two.results.every((r) => r.session.start >= afternoon.start) && two.results.length >= 1);
 }
 
 // --- Exportación del registro bruto -----------------------------------------

@@ -136,7 +136,9 @@ function reducer(state: AppState, action: Action): AppState {
       // La tarde quieta que se propuso anoche sobra si llega la noche de verdad.
       const queue = state.pendingSessions.filter((s) => !supersedesPending(action.session, s));
 
-      if (state.monitor.autoConfirm) {
+      // Una propuesta de inicio deducido nunca se guarda sola: se queda en la
+      // cola para que la corrijas.
+      if (state.monitor.autoConfirm && !action.session.inferred) {
         return {
           ...state,
           pendingSessions: queue,
@@ -274,6 +276,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         // Si un sensor ya dijo cuándo se apagó la luz o se paró la actividad,
         // eso manda sobre lo que se espera de ti.
         habit: result.evidence?.activityAt != null ? null : habit,
+        // La hora habitual sólo mueve el inicio si hay evidencia de quietud.
+        evidence: result.evidence,
       });
       dispatch({ type: 'proposeSession', session: refined });
     };

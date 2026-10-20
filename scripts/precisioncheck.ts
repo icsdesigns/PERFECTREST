@@ -736,9 +736,25 @@ console.log('\n--- Precisión: el uso sostenido corta el hueco ---');
     lastSustainedUse([e('2026-09-22T03:00:00', 'screen-on'), e('2026-09-22T03:02:00', 'screen-off')], from, to) === null);
   assert('varios vistazos seguidos suman uso: 6 minutos en total sí lo son',
     lastSustainedUse([
-      e('2026-09-22T03:00:00', 'screen-on'), e('2026-09-22T03:03:00', 'screen-off'),
-      e('2026-09-22T03:10:00', 'screen-on'), e('2026-09-22T03:13:00', 'screen-off'),
+      e('2026-09-22T03:00:00', 'screen-on'), e('2026-09-22T03:00:03', 'unlock'), e('2026-09-22T03:03:00', 'screen-off'),
+      e('2026-09-22T03:10:00', 'screen-on'), e('2026-09-22T03:10:03', 'unlock'), e('2026-09-22T03:13:00', 'screen-off'),
     ], from, to) === at('2026-09-22T03:13:00'));
+  // Un chat ruidoso: cuarenta notificaciones que encienden la pantalla ocho
+  // segundos, cada quince minutos, sin que nadie desbloquee. No es uso.
+  const chatty: RawEvent[] = [];
+  for (let t = at('2026-09-21T23:00:00'), i = 0; i < 40; i++, t += 15 * MINUTE) {
+    chatty.push({ at: t, kind: 'screen-on' }, { at: t + 8_000, kind: 'screen-off' });
+  }
+  assert('las pantallas que enciende una notificación, sin desbloquear, no suman uso',
+    lastSustainedUse(chatty, from, at('2026-09-22T09:30:00')) === null);
+  const chattyNight = evaluateGaps(
+    [gap('2026-09-21T23:00:00', '2026-09-22T07:30:00', { startTrigger: 'charger', endTrigger: 'charger' })],
+    { ...MON, triggers: { ...DEFAULT_TRIGGERS, charger: true } },
+    { habit, events: chatty },
+  );
+  assert('y la noche del cargador con un chat ruidoso no se pierde',
+    chattyNight.results.length === 1 && clock(chattyNight.results[0].session.start) === '23:00',
+    chattyNight.results.map((r) => clock(r.session.start)));
   assert('tres desbloqueos en un rato son sostenido aunque sean de segundos',
     lastSustainedUse([
       e('2026-09-22T03:00:00', 'screen-on'), e('2026-09-22T03:00:01', 'unlock'), e('2026-09-22T03:00:20', 'screen-off'),
@@ -746,7 +762,7 @@ console.log('\n--- Precisión: el uso sostenido corta el hueco ---');
       e('2026-09-22T03:10:00', 'screen-on'), e('2026-09-22T03:10:01', 'unlock'), e('2026-09-22T03:10:20', 'screen-off'),
     ], from, to) === at('2026-09-22T03:10:20'));
   assert('el último de varios usos sostenidos manda',
-    lastSustainedUse([...long, e('2026-09-21T23:00:00', 'screen-on'), e('2026-09-21T23:20:00', 'screen-off')], from, to) === at('2026-09-21T23:20:00'));
+    lastSustainedUse([...long, e('2026-09-21T23:00:00', 'screen-on'), e('2026-09-21T23:00:04', 'unlock'), e('2026-09-21T23:20:00', 'screen-off')], from, to) === at('2026-09-21T23:20:00'));
 
   // Un hueco del cargador abarca un rato de móvil en la mano: la noche empieza después.
   const charger = { ...MON, triggers: { ...DEFAULT_TRIGGERS, charger: true } };
@@ -762,7 +778,7 @@ console.log('\n--- Precisión: el uso sostenido corta el hueco ---');
   // Si lo que queda tras el uso ya no es una noche, todo el hueco se descarta como sueño.
   const tail = evaluateGaps([gap('2026-09-21T19:00:00', '2026-09-22T00:30:00', { startTrigger: 'charger', endTrigger: 'charger' })], charger, {
     habit,
-    events: [e('2026-09-21T19:10:00', 'screen-on'), e('2026-09-21T22:30:00', 'screen-off')],
+    events: [e('2026-09-21T19:10:00', 'screen-on'), e('2026-09-21T19:10:02', 'unlock'), e('2026-09-21T22:30:00', 'screen-off')],
   });
   assert('y si tras el uso no queda una noche, el hueco entero deja de ser sueño',
     tail.results.length === 0 && tail.rejected.length === 1, tail.rejected.map((r) => r.reason));

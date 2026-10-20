@@ -393,6 +393,8 @@ const SUSTAINED_USE_MS = 5 * MINUTE;
 const SUSTAINED_UNLOCKS = 3;
 /** Dos usos separados por más de esto pertenecen a rachas distintas. */
 const USE_CLUSTER_GAP_MS = 20 * MINUTE;
+/** Un desbloqueo anotado un poco antes del encendido (relojes distintos) sigue siendo de ese encendido. */
+const UNLOCK_SLACK_MS = 5_000;
 
 /**
  * Fin del último uso sostenido del móvil dentro de un tramo, según el registro
@@ -416,6 +418,13 @@ export function lastSustainedUse(events: RawEvent[], from: number, to: number): 
     }
   }
   const unlocks = events.filter((e) => e.kind === 'unlock' && e.at >= from && e.at <= to).map((e) => e.at);
+  // Sólo cuenta como uso la pantalla que alguien desbloqueó, como en el
+  // servicio: las que enciende una notificación o el gesto de levantar el móvil
+  // se quedan en la pantalla de bloqueo. Sumarlas daba por «uso sostenido» una
+  // noche de chat ruidoso (cuarenta notificaciones de ocho segundos, a menos de
+  // veinte minutos unas de otras, ya son cinco minutos) y la noche se perdía.
+  const unlocked = (s: { on: number; off: number }) => unlocks.some((u) => u >= s.on - UNLOCK_SLACK_MS && u <= s.off);
+  const used = stints.filter(unlocked);
 
   let last: number | null = null;
   let cluster: Array<{ on: number; off: number }> = [];
@@ -424,11 +433,11 @@ export function lastSustainedUse(events: RawEvent[], from: number, to: number): 
     const first = cluster[0].on;
     const end = cluster[cluster.length - 1].off;
     const use = cluster.reduce((sum, s) => sum + (s.off - s.on), 0);
-    const count = unlocks.filter((u) => u >= first - 5_000 && u <= end).length;
+    const count = unlocks.filter((u) => u >= first - UNLOCK_SLACK_MS && u <= end).length;
     if (use >= SUSTAINED_USE_MS || count >= SUSTAINED_UNLOCKS) last = end;
     cluster = [];
   };
-  for (const s of stints) {
+  for (const s of used) {
     if (cluster.length && s.on - cluster[cluster.length - 1].off > USE_CLUSTER_GAP_MS) close();
     cluster.push(s);
   }

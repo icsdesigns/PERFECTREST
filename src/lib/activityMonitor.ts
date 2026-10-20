@@ -315,11 +315,19 @@ function assessGap(
   // despierto horas sin tocarlo. No se corrige por el reloj (ver `refineEdges`),
   // pero tampoco se da por bueno: se propone como dudoso.
   const sensorStart = !!ev && ev.activityAt !== null;
-  const inferred =
-    !!ctx.inferred ||
-    (!sensorStart &&
-      !quietEvidence(ev) &&
-      habitLead(start + (ctx.latencyMinutes ?? DEFAULT_LATENCY_MIN) * MINUTE, habit) > EARLY_UNVERIFIED_MIN);
+  const earlyUnverified =
+    !sensorStart &&
+    !quietEvidence(ev) &&
+    habitLead(start + (ctx.latencyMinutes ?? DEFAULT_LATENCY_MIN) * MINUTE, habit) > EARLY_UNVERIFIED_MIN;
+  const inferred = !!ctx.inferred || earlyUnverified;
+  // Inferida no es lo mismo que inverosímil: la noche que sólo se pudo colocar
+  // a tu hora habitual, con un hábito firme y una duración y un despertar
+  // (medido) que encajan con él, es una estimación razonable. Sube a media
+  // —nunca a alta—, sigue marcada como inferida y no se guarda sola. El inicio
+  // medido muy anterior a tu hora no sube: ahí lo que dice la medida y lo que
+  // dice el hábito no coinciden.
+  const inferredConfidence: Confidence =
+    !earlyUnverified && confidence !== 'low' && fitsFirmHabit(start, end, habit) ? 'medium' : 'low';
 
   return {
     result: {
@@ -332,7 +340,7 @@ function assessGap(
         start,
         end,
         source: 'auto',
-        confidence: inferred ? 'low' : confidence,
+        confidence: inferred ? inferredConfidence : confidence,
         ...(inferred ? { inferred: true } : {}),
         confirmed: false,
         triggers: sortTriggers(triggers),
@@ -341,6 +349,27 @@ function assessGap(
       },
     },
   };
+}
+
+/** Noches con hora real que hacen falta para fiarse del hábito al valorar una noche inferida. */
+const FIRM_HABIT_NIGHTS = 7;
+/** Variación máxima de tu hora de acostarte (min) para dar el hábito por firme. */
+const FIRM_HABIT_SPREAD_MIN = 60;
+/** Cuánto puede separarse la noche inferida de tu duración y tu hora de levantarte habituales. */
+const FIRM_HABIT_DURATION_SLACK_MS = 90 * MINUTE;
+const FIRM_HABIT_WAKE_SLACK_MIN = 60;
+
+/**
+ * ¿Encaja la noche con un hábito firme? Muchas noches con hora real, poca
+ * variación entre ellas, una duración parecida a la tuya y un final —que sí es
+ * medido: el desbloqueo de la mañana— cerca de tu hora de levantarte.
+ */
+function fitsFirmHabit(start: number, end: number, habit: SleepHabit): boolean {
+  if (habit.n < FIRM_HABIT_NIGHTS) return false;
+  if (habit.spreadMin === undefined || habit.spreadMin > FIRM_HABIT_SPREAD_MIN) return false;
+  const typical = ((((habit.endMin - habit.startMin) % 1440) + 1440) % 1440) * MINUTE;
+  if (Math.abs(end - start - typical) > FIRM_HABIT_DURATION_SLACK_MS) return false;
+  return Math.abs(minuteDiff(habit.endMin, minutesOfDay(end))) <= FIRM_HABIT_WAKE_SLACK_MIN;
 }
 
 /** Latencia con la que se juzga el inicio cuando quien llama no dice otra. */

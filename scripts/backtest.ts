@@ -182,6 +182,8 @@ interface Metrics {
   doubtful: number;
   /** Inicios equivocados por más de una hora que NO van marcados como dudosos. */
   wrongButFirm: number;
+  /** Error del inicio según la confianza con que se propuso: dice si la etiqueta es honesta. */
+  byConfidence: Record<SleepSession['confidence'], number[]>;
 }
 
 function measure(sessions: Array<SleepSession | null>): Metrics {
@@ -198,6 +200,7 @@ function measure(sessions: Array<SleepSession | null>): Metrics {
     firmStartErrors: [],
     doubtful: 0,
     wrongButFirm: 0,
+    byConfidence: { high: [], medium: [], low: [] },
   };
   history.forEach((orig, i) => {
     const t = truths[i];
@@ -217,6 +220,7 @@ function measure(sessions: Array<SleepSession | null>): Metrics {
       if (t.start !== null) {
         const err = min(s.start - t.start);
         m.startErrors.push(err);
+        m.byConfidence[s.confidence].push(err);
         if (s.confidence === 'high' && err > 60) m.highConfidenceWrong++;
         if (s.inferred) m.doubtful++;
         else {
@@ -248,6 +252,11 @@ function report(name: string, m: Metrics) {
       ` de ellas dudosas (inicio inferido): ${m.doubtful}/${m.startErrors.length}` +
       ` | inicio de las no dudosas: error medio ${Math.round(mean(m.firmStartErrors))} min (${m.firmStartErrors.length})` +
       ` | >60 min sin marcar como dudosas: ${m.wrongButFirm}`,
+  );
+  const conf = (c: SleepSession['confidence'], label: string) =>
+    `${label} ${Math.round(mean(m.byConfidence[c]))} min (${m.byConfidence[c].length})`;
+  console.log(
+    `  ${''.padEnd(22)} error del inicio por confianza: ${conf('high', 'alta')}, ${conf('medium', 'media')}, ${conf('low', 'baja')}`,
   );
 }
 
@@ -331,6 +340,11 @@ if (usingFixture) {
     'las propuestas no dudosas tienen el inicio a menos de 20 min de media, también en línea',
     mean(looM.firmStartErrors) < 20 && mean(online.firmStartErrors) < 20,
     [Math.round(mean(looM.firmStartErrors)), Math.round(mean(online.firmStartErrors))],
+  );
+  assert(
+    'la confianza es honesta: las de confianza media se equivocan menos de una hora de media y las altas menos que las medias',
+    mean(looM.byConfidence.medium) < 60 && mean(looM.byConfidence.high) <= mean(looM.byConfidence.medium),
+    [Math.round(mean(looM.byConfidence.high)), Math.round(mean(looM.byConfidence.medium))],
   );
   assert(
     'ya no hay noches de confianza alta con un inicio 60 min equivocado',

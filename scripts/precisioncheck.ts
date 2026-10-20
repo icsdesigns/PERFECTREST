@@ -652,6 +652,26 @@ console.log('\n--- Precisión: el reloj no inventa sueño ---');
     bare.results.length === 1 && r0.inferred === true && r0.session.inferred === true && r0.session.confidence === 'low');
   assert('y nunca antes del último uso real del móvil', r0.session.start >= longGap.start);
 
+  // Con un hábito firme (muchas noches, poca variación) y una noche que encaja
+  // con él en duración y en la hora de levantarse, la noche inferida es una
+  // estimación razonable: media, nunca alta, y sigue marcada como inferida.
+  const firmHabit = { ...habit, spreadMin: 30 };
+  const fitting = gap('2026-09-21T17:00:00', '2026-09-22T08:30:00');
+  const firmFit = evaluateGaps([fitting], MON, { habit: firmHabit }).results[0];
+  assert('con un hábito firme y una noche que encaja, la inferida sube a confianza media',
+    !!firmFit && firmFit.inferred === true && firmFit.session.inferred === true && firmFit.session.confidence === 'medium',
+    firmFit && [clock(firmFit.session.start), firmFit.session.confidence]);
+  const loose = evaluateGaps([fitting], MON, { habit: { ...habit, spreadMin: 90 } }).results[0];
+  assert('con un hábito que varía mucho se queda en baja', loose?.session.confidence === 'low', loose?.session.confidence);
+  const lateWake = evaluateGaps([gap('2026-09-21T17:00:00', '2026-09-22T11:20:00')], MON, { habit: firmHabit }).results[0];
+  assert('y si la mañana no encaja con tu hora de levantarte, también',
+    !lateWake || lateWake.session.confidence === 'low', lateWake?.session.confidence);
+  const earlyFirm = evaluateGaps([gap('2026-09-21T21:40:00', '2026-09-22T08:00:00')], MON, { habit: firmHabit }).results[0];
+  assert('un inicio medido muy anterior a tu hora no sube aunque el hábito sea firme',
+    earlyFirm?.inferred === true && earlyFirm.session.confidence === 'low', earlyFirm?.session.confidence);
+  assert('ni la refinada de una inferida media pasa a alta',
+    refineEdges(firmFit.session, 15, { habit: firmHabit }).confidence === 'medium');
+
   // Con el móvil plano toda la noche desde la hora habitual, la quietud sostiene la hora.
   const flatNight = readings('2026-09-21T23:40:00', '2026-09-22T08:50:00', POSTURE_FLAT_UP);
   const backed = evaluateGaps([longGap], on('posture'), { habit, events: flatNight });

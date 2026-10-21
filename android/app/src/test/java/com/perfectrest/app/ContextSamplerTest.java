@@ -142,4 +142,17 @@ public class ContextSamplerTest {
         }
         assertNull(RawEventLog.recent(many, "steps", 3_000L, 60_000L));
     }
+
+    @Test
+    public void olvidarLasLecturasHaceQueSeVuelvanAAnotar() {
+        ContextSampler.forget();
+        ContextSampler.remember("batt", 80, 1_000L);
+        ContextSampler.remember("net", ContextSampler.NET_WIFI, 1_000L);
+        assertEquals(2, ContextSampler.remembered());
+        // Al apagar el ajuste o borrar el registro bruto se olvida todo…
+        ContextSampler.forget();
+        assertEquals(0, ContextSampler.remembered());
+        // …y la lectura siguiente se anota aunque el valor no haya cambiado.
+        assertTrue(ContextSampler.shouldLog(null, 80, 2_000L, 4));
+    }
 }

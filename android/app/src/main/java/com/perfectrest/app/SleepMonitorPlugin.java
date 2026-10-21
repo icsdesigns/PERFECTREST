@@ -360,6 +360,9 @@ public class SleepMonitorPlugin extends Plugin {
     @PluginMethod
     public void clearRawEvents(PluginCall call) {
         RawEventLog.clear(getContext());
+        // Sin el registro, las últimas lecturas recordadas ya no están escritas en
+        // ninguna parte: se olvidan para que el siguiente muestreo las vuelva a anotar.
+        ContextSampler.forget();
         call.resolve();
     }
 

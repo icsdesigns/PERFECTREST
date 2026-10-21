@@ -154,6 +154,28 @@ final class ContextSampler {
         return music > 0 ? music : sco;
     }
 
+    /** Olvida las últimas lecturas anotadas (ajuste apagado o registro borrado). */
+    static void forget() {
+        synchronized (LOCK) {
+            LAST.clear();
+            lastSampleAt = 0L;
+        }
+    }
+
+    /** Cuántos tipos tienen una última lectura en memoria. Para las pruebas. */
+    static int remembered() {
+        synchronized (LOCK) {
+            return LAST.size();
+        }
+    }
+
+    /** Recuerda una lectura como anotada sin escribirla en el registro. Para las pruebas. */
+    static void remember(String kind, long value, long at) {
+        synchronized (LOCK) {
+            LAST.put(kind, new long[] {value, at});
+        }
+    }
+
     // --- Lecturas del sistema ---
 
     private static Intent batteryIntent(Context context) {
@@ -210,7 +232,13 @@ final class ContextSampler {
      * nada. No hace nada si el ajuste está apagado.
      */
     static void sample(Context context, boolean force) {
-        if (!enabled(context)) return;
+        if (!enabled(context)) {
+            // Con el ajuste apagado se olvidan las últimas lecturas: al
+            // reactivarlo, la primera vuelve a anotar todos los valores aunque
+            // no hayan cambiado, y la noche siguiente no se queda sin ellos.
+            forget();
+            return;
+        }
         long now = System.currentTimeMillis();
         synchronized (LOCK) {
             if (!force && now - lastSampleAt < MIN_SPACING_MS) return;

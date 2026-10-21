@@ -84,8 +84,47 @@ export function minuteDiff(a: number, b: number): number {
 export function knownStart(s: SleepSession): number | null {
   const truth = parseNote(s);
   if (truth.start !== null) return truth.start;
+  // La hora habitual que el usuario aplicó con un toque salió del propio
+  // hábito: aprender de ella lo reforzaría a sí mismo sin aportar nada nuevo.
+  if (s.habitStart) return null;
   if (s.source === 'edited' || s.source === 'manual') return s.start;
   return null;
+}
+
+/** Una noche tiene que dejar al menos esto de sueño para ofrecer la hora habitual como inicio. */
+const HABIT_OFFER_MIN_MS = 3 * HOUR;
+/** Por debajo de esta diferencia con el inicio actual, ofrecer la hora habitual no cambia nada. */
+const HABIT_OFFER_MIN_SHIFT_MS = 10 * MINUTE;
+
+/**
+ * La hora habitual de acostarte puesta en la noche de esta sesión, para el
+ * botón «¿Desde las 23:40, como sueles?» de las propuestas de inicio dudoso.
+ *
+ * Es la ocurrencia de esa hora del día más cercana al inicio propuesto que deja
+ * entre tres y trece horas de sueño hasta el despertar. Sólo hay oferta con un
+ * hábito *aprendido* de tus noches (`n > 0`), no con la meta del horario, y
+ * sólo si cambia el inicio de verdad. Nunca se aplica sola: es el usuario quien
+ * la toca.
+ */
+export function habitualStart(
+  session: Pick<SleepSession, 'start' | 'end'>,
+  habit: SleepHabit | null | undefined,
+): number | null {
+  if (!habit || habit.n <= 0) return null;
+  const minutes = Math.round(habit.startMin) % 1440;
+  const end = new Date(session.end);
+  let best: number | null = null;
+  for (const back of [0, 1, 2]) {
+    const c = new Date(end);
+    c.setDate(end.getDate() - back);
+    c.setHours(Math.floor(minutes / 60), minutes % 60, 0, 0);
+    const t = c.getTime();
+    const sleep = session.end - t;
+    if (sleep < HABIT_OFFER_MIN_MS || sleep > MAX_NIGHT_MS + 30 * MINUTE) continue;
+    if (best === null || Math.abs(t - session.start) < Math.abs(best - session.start)) best = t;
+  }
+  if (best === null || Math.abs(best - session.start) < HABIT_OFFER_MIN_SHIFT_MS) return null;
+  return best;
 }
 
 /** Inicio medido por el dispositivo; para sesiones viejas, el que recuerda el id. */

@@ -71,6 +71,12 @@ export interface DetectionResult {
    * guarda sola.
    */
   inferred?: boolean;
+  /**
+   * Huecos de la misma noche que se descartaron y por qué (como mucho cinco),
+   * para la traza del contexto: «ya hay una noche principal», «hueco corto
+   * fuera de tu hora»…
+   */
+  discards?: Array<{ reason: RejectedGap['reason']; start: number; end: number }>;
 }
 
 /**
@@ -1057,6 +1063,16 @@ function asNap(r: DetectionResult): DetectionResult {
   };
 }
 
+/** Anota en la propuesta los huecos que se descartaron esa misma noche. */
+function withDiscards(r: DetectionResult, rejected: RejectedGap[]): DetectionResult {
+  const key = nightKey(r.session.start, r.session.end);
+  const same = rejected
+    .filter((x) => nightKey(x.gap.start, x.gap.end) === key)
+    .slice(0, 5)
+    .map((x) => ({ reason: x.reason, start: x.gap.start, end: x.gap.end }));
+  return same.length ? { ...r, discards: same } : r;
+}
+
 /** Lo que se escribe en el registro por cada motivo de descarte. */
 const REJECT_TEXT: Record<RejectedGap['reason'], string> = {
   'trigger-off': 'el disparador está apagado',
@@ -1120,7 +1136,7 @@ export async function collectNativeGaps(
   // Sólo se borra hasta el último hueco leído: si el servicio encoló uno nuevo
   // entre la lectura y el borrado, sobrevive hasta la vuelta siguiente.
   await clearGaps(processedUntil);
-  return results;
+  return results.map((r) => withDiscards(r, rejected));
 }
 
 /**

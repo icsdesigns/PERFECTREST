@@ -2,6 +2,7 @@ import { Capacitor } from '@capacitor/core';
 import { Directory, Filesystem, Encoding } from '@capacitor/filesystem';
 import { Share } from '@capacitor/share';
 import type { RawEvent } from './rawEvents';
+import { CONTEXT_COLUMNS, flattenContext } from './sessionContext';
 import type { SleepSession } from './types';
 
 export type ExportFormat = 'csv' | 'json';
@@ -24,16 +25,26 @@ function csvField(v: string | number | undefined): string {
   return /[",;\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
-const HEADER = [
+const BASE_HEADER = [
   'fecha', 'inicio', 'fin', 'horas', 'origen', 'confianza', 'confirmada', 'calidad', 'nota',
 ];
+
+/**
+ * Las columnas de siempre, seguidas de dos del inicio dudoso y de las del
+ * contexto del dispositivo aplanado. Las del contexto van siempre, aunque la
+ * noche no lo tenga (quedan vacías), para que la cabecera sea la misma en
+ * todas las exportaciones y se puedan juntar. El detalle completo, anidado,
+ * está en el JSON.
+ */
+const HEADER = [...BASE_HEADER, 'inferida', 'inicio_habitual', ...CONTEXT_COLUMNS];
 
 /** Una fila por noche, de la más antigua a la más reciente. */
 export function sessionsToCsv(sessions: SleepSession[]): string {
   const rows = [...sessions]
     .sort((a, b) => a.start - b.start)
-    .map((s) =>
-      [
+    .map((s) => {
+      const ctx = flattenContext(s.context);
+      return [
         localDate(s.end),
         `${localDate(s.start)} ${localTime(s.start)}`,
         `${localDate(s.end)} ${localTime(s.end)}`,
@@ -43,14 +54,18 @@ export function sessionsToCsv(sessions: SleepSession[]): string {
         s.confirmed ? 'sí' : 'no',
         s.quality,
         s.note,
+        s.inferred ? 1 : 0,
+        s.habitStart ? 1 : 0,
+        ...CONTEXT_COLUMNS.map((c) => ctx[c]),
       ]
         .map(csvField)
-        .join(','),
-    );
+        .join(',');
+    });
   // BOM para que Excel abra bien los acentos.
   return '﻿' + [HEADER.join(','), ...rows].join('\r\n') + '\r\n';
 }
 
+/** El historial entero, con el contexto de cada noche anidado tal como se guarda. */
 export function sessionsToJson(sessions: SleepSession[]): string {
   const sorted = [...sessions].sort((a, b) => a.start - b.start);
   return JSON.stringify(sorted, null, 2);

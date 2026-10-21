@@ -83,6 +83,26 @@ export interface MonitorStatus {
   lastError: string | null;
 }
 
+/**
+ * Lo que el servicio sabe del móvil ahora mismo. Todos los campos son
+ * opcionales: el servicio omite lo que no puede leer. Sin identificadores,
+ * ubicación ni nombres de redes o dispositivos.
+ */
+export interface DeviceSnapshot {
+  device?: {
+    model?: string;
+    manufacturer?: string;
+    sdk?: number;
+    release?: string;
+    locale?: string;
+    tz?: string;
+    tzOffsetMin?: number;
+    app?: string;
+  };
+  state?: Record<string, number | boolean | undefined>;
+  sensors?: Partial<SensorStatus>;
+}
+
 interface SleepMonitorPlugin {
   start(options: {
     minGapMinutes: number;
@@ -95,6 +115,8 @@ interface SleepMonitorPlugin {
     nightEndMinutes: number;
     /** Sensores opcionales activos; el servicio sólo registra los de la lista. */
     sensors?: SensorId[];
+    /** Muestrear el estado del dispositivo para el contexto de cada noche. */
+    deviceContext?: boolean;
   }): Promise<{ running: boolean }>;
   stop(): Promise<{ running: boolean }>;
   isRunning(): Promise<MonitorStatus>;
@@ -110,6 +132,8 @@ interface SleepMonitorPlugin {
   /** Registro bruto (pantalla, cargador, sensores), para cruzarlo con los huecos y exportarlo. */
   getRawEvents(): Promise<{ events: RawEvent[] }>;
   clearRawEvents(): Promise<void>;
+  /** Datos estáticos del móvil y estado de ahora mismo, para el contexto de la noche. */
+  getDeviceSnapshot(): Promise<DeviceSnapshot>;
   /** Qué sensores tiene el móvil y cuáles puede usar con los permisos actuales. */
   sensorStatus(): Promise<{ sensors: SensorStatus }>;
   /** Pide el permiso «Actividad física» (pasos). Devuelve si quedó concedido. */
@@ -161,6 +185,8 @@ export interface BackgroundOptions {
   nightEndMinutes: number;
   /** Sensores opcionales activos (fase 2); vacío si no hay ninguno. */
   sensors?: SensorId[];
+  /** Muestrear el estado del dispositivo para el contexto de cada noche (por defecto sí). */
+  deviceContext?: boolean;
 }
 
 export async function startBackground(options: BackgroundOptions): Promise<boolean> {
@@ -391,6 +417,19 @@ export async function clearRawEvents(): Promise<void> {
     await SleepMonitor.clearRawEvents();
   } catch {
     /* sin servicio no hay registro que limpiar */
+  }
+}
+
+/**
+ * Instantánea del dispositivo para el contexto de una noche; null sin servicio
+ * nativo o con una versión anterior del plugin que no la conoce.
+ */
+export async function readDeviceSnapshot(): Promise<DeviceSnapshot | null> {
+  if (!isBackgroundAvailable()) return null;
+  try {
+    return await SleepMonitor.getDeviceSnapshot();
+  } catch {
+    return null;
   }
 }
 

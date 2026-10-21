@@ -11,6 +11,8 @@ import {
   type RawEvent,
   type RawKind,
 } from './rawEvents';
+import type { DetectionResult } from './activityMonitor';
+import type { SleepHabit } from './habit';
 import type {
   ContextAlgo,
   ContextDevice,
@@ -486,7 +488,135 @@ export function buildContext(input: ContextInput): SessionContext {
   return ctx;
 }
 
+// --- Datos del aparato -------------------------------------------------------------
+
+export interface DeviceInput {
+  /** Inicio de la sesión: de él sale el desfase horario (cambia con el horario de verano). */
+  start: number;
+  /** Versión de la app según la compilación web. */
+  appVersion: string;
+  /** Lo que respondió el servicio nativo; null en el navegador o con un plugin antiguo. */
+  snapshot?: {
+    device?: Record<string, unknown>;
+    sensors?: Record<string, { available?: boolean } | undefined>;
+  } | null;
+  /** Idioma y zona de la capa web, por si el servicio no las da. */
+  locale?: string;
+  tz?: string;
+  /** Estado del servicio: exención de batería, alarmas exactas y notificaciones. */
+  status?: { batteryExempt: boolean; exactAlarms: boolean; notifications: boolean } | null;
+}
+
+const text = (x: unknown, max = 64): string | undefined =>
+  typeof x === 'string' && x.trim() ? x.trim().slice(0, max) : undefined;
+const int = (x: unknown): number | undefined =>
+  typeof x === 'number' && Number.isFinite(x) ? Math.round(x) : undefined;
+
+/**
+ * Datos estáticos del móvil y de la app. Copia sólo campos conocidos y de la
+ * forma esperada, así que lo que devuelva un plugin raro no entra tal cual.
+ * Nunca lleva identificadores ni nombres (ni de red, ni de Bluetooth).
+ */
+export function buildDevice(input: DeviceInput): ContextDevice {
+  const d = input.snapshot?.device ?? {};
+  const out: ContextDevice = {
+    app: text(d.app) ?? input.appVersion,
+    // El desfase de la zona en el momento de dormirse, no el de ahora.
+    tzOffsetMin: -new Date(input.start).getTimezoneOffset(),
+  };
+  const model = text(d.model);
+  if (model) out.model = model;
+  const manufacturer = text(d.manufacturer);
+  if (manufacturer) out.manufacturer = manufacturer;
+  const sdk = int(d.sdk);
+  if (sdk !== undefined) out.sdk = sdk;
+  const release = text(d.release, 16);
+  if (release) out.release = release;
+  const locale = text(d.locale, 24) ?? text(input.locale, 24);
+  if (locale) out.locale = locale;
+  const tz = text(d.tz, 48) ?? text(input.tz, 48);
+  if (tz) out.tz = tz;
+
+  const sensors = input.snapshot?.sensors;
+  if (sensors) {
+    const has: Record<string, boolean> = {};
+    for (const [id, v] of Object.entries(sensors)) {
+      if (v && typeof v.available === 'boolean') has[id] = v.available;
+    }
+    if (Object.keys(has).length) out.hasSensors = has;
+  }
+  if (input.status) {
+    out.batteryExempt = input.status.batteryExempt;
+    out.exactAlarms = input.status.exactAlarms;
+    out.notifications = input.status.notifications;
+  }
+  return out;
+}
+
 // --- Traza del algoritmo ---------------------------------------------------------
+
+export interface AlgoInput {
+  /** La detección tal como salió de la evaluación. */
+  result: DetectionResult;
+  /** La sesión ya refinada, que es la que se propone. */
+  refined: SleepSession;
+  /** Hábito aprendido en ese momento. */
+  habit?: SleepHabit | null;
+  /** Latencia que se sumó al inicio y de dónde salió. */
+  latencyMin?: number;
+  latencySource?: 'learned' | 'settings';
+  /** Sensores de detección activos. */
+  sensors: SensorId[];
+}
+
+/** Cómo llegó el algoritmo a esta propuesta: lo que se guarda para perfeccionarlo. */
+export function buildAlgo(input: AlgoInput): ContextAlgo {
+  const { result, refined, habit } = input;
+  const ev = result.evidence;
+  const startRef = refined.detectedStart ?? refined.start;
+  const endRef = refined.detectedEnd ?? refined.end;
+  const out: ContextAlgo = {
+    triggers: refined.triggers ?? [],
+    confidence: refined.confidence,
+    inferred: !!refined.inferred,
+    sensors: input.sensors,
+  };
+  if (refined.nap) out.nap = true;
+  if (result.score !== undefined) out.score = Math.round(result.score * 100) / 100;
+  if (result.gapMs > 0) out.gapMin = Math.round(result.gapMs / MINUTE);
+  out.startShiftMin = Math.round((refined.start - startRef) / MINUTE);
+  out.endShiftMin = Math.round((refined.end - endRef) / MINUTE);
+  if (input.latencyMin !== undefined) {
+    out.latencyMin = Math.round(input.latencyMin * 10) / 10;
+    if (input.latencySource) out.latencySource = input.latencySource;
+  }
+  if (habit) {
+    out.habit = {
+      startMin: Math.round(habit.startMin),
+      endMin: Math.round(habit.endMin),
+      n: habit.n,
+      ...(habit.spreadMin !== undefined ? { spreadMin: Math.round(habit.spreadMin) } : {}),
+    };
+  }
+  if (ev && ev.sensors.length) {
+    out.evidence = {
+      activityAt: ev.activityAt,
+      wakeAt: ev.wakeAt,
+      dark: ev.dark === null ? null : Math.round(ev.dark * 100) / 100,
+      moves: ev.moves,
+      flat: ev.flat === null ? null : Math.round(ev.flat * 100) / 100,
+      alarmMatch: ev.alarmMatch,
+    };
+  }
+  if (result.discards?.length) {
+    out.discards = result.discards.map((d) => ({
+      reason: d.reason,
+      startMin: Math.round((d.start - refined.start) / MINUTE),
+      endMin: Math.round((d.end - refined.start) / MINUTE),
+    }));
+  }
+  return out;
+}
 
 /** Contexto mínimo de una propuesta: sólo cómo se llegó a ella, antes de recoger nada del dispositivo. */
 export function contextFromAlgo(algo: ContextAlgo): SessionContext {

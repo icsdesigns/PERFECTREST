@@ -396,8 +396,10 @@ para saber si hay conexión y de qué tipo. No se pide ubicación, ni
 `BLUETOOTH_CONNECT` (peligroso desde Android 12): los auriculares conectados se
 cuentan con `AudioManager.getDevices`, que no lo necesita.
 
-**Tamaño y limpieza.** Un contexto normal ocupa alrededor de 1,5 KB (120 noches, unos 180 KB); se descarta al cargar
-cualquiera de más de 8 KB o con otra forma. Se conservan los contextos de las
+**Tamaño y limpieza.** Un contexto normal ocupa alrededor de 1,5 KB (120 noches,
+unos 180 KB) y uno muy cargado —todos los sensores, 20 usos y la línea de tiempo
+llena— unos 3 KB (unos 350 KB en el peor caso); se descarta al cargar cualquiera
+de más de 8 KB o con otra forma. Se conservan los contextos de las
 **120 noches más recientes** y de menos de un año
 ([`pruneContexts`](src/lib/sessionContext.ts)); las sesiones en sí no se tocan.
 Las sesiones anteriores a la función siguen igual, sin `context`. El estado ya
@@ -422,8 +424,9 @@ no cubre el tramo queda marcada como `partial`.
   del registro bruto sigue igual (con los eventos nuevos).
 - En Ajustes, el interruptor **«Guardar contexto del dispositivo con cada
   noche»** (activado por defecto, con el texto de privacidad). Apagado, la app no
-  guarda ningún contexto y el servicio deja de muestrear y de escuchar esas
-  difusiones. **«Borrar contextos guardados»** los quita todos y no se vuelven a
+  guarda ningún contexto —tampoco el de una recogida que estuviera en curso— y el
+  servicio deja de muestrear y de escuchar esas difusiones, y olvida las últimas
+  lecturas para anotarlas todas de nuevo si se reactiva. **«Borrar contextos guardados»** los quita todos y no se vuelven a
   calcular; reactivar el ajuste sólo recoge las noches que acaben a partir de
   ese momento. **«Borrar registro bruto»** vacía además los eventos que el
   servicio guarda en el móvil.
@@ -483,7 +486,10 @@ aprender de una hora que salió del propio hábito lo reforzaría a sí mismo.
 - **Render** ([`scripts/rendercheck.tsx`](scripts/rendercheck.tsx)) — cada
   pantalla se renderiza fuera del navegador para detectar errores de render,
   con la sección plegable del contexto, el botón de la hora habitual y el
-  interruptor de privacidad de Ajustes.
+  interruptor de privacidad de Ajustes; y el estado: un contexto que llega
+  después de apagar el ajuste o de borrar los contextos no se guarda. La
+  auditoría de maquetación (`npm run layout`) incluye una propuesta dudosa con
+  el botón de la hora habitual y la sección del contexto desplegada.
 
 El contexto del dispositivo no cambió las reglas de huecos del servicio (sólo
 añadió muestreo), así que el modelo de `nightsim.ts` sigue siendo fiel, y el

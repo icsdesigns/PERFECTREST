@@ -150,10 +150,14 @@ exporta en CSV o JSON desde Ajustes, junto al historial.
 
 **Postura del móvil** ([`SensorWatcher.java`](android/app/src/main/java/com/perfectrest/app/SensorWatcher.java)).
 No deja ningún sensor escuchando: con la pantalla apagada y dentro de la ventana
-nocturna, cada rearme del vigilante (**cada 10 minutos** con este sensor activo
-en vez de 15, por encima de los 9 que Android deja entre dos alarmas en reposo)
-abre el acelerómetro unos 2,5 s, clasifica y lo cierra, con un wakelock de 6 s
-que se suelta solo. La clasificación mira la gravedad media (inclinación sobre
+nocturna, cada rearme del vigilante (**cada 10 minutos** de noche con este
+sensor activo en vez de 15, por encima de los 9 que Android deja entre dos
+alarmas en reposo; de día sigue a 15) y unos 45 s después de apagarse la
+pantalla —para no leer el móvil aún en la mano— abre el acelerómetro unos
+2,5 s, clasifica y lo cierra, con un wakelock de 6 s que se suelta solo. El
+wakelock (`WAKE_LOCK`, permiso normal que no pregunta nada) sí hace falta: el
+acelerómetro que no despierta el procesador deja de entregar en cuanto éste se
+duerme, y la variante que sí lo despierta casi ningún móvil la trae. La clasificación mira la gravedad media (inclinación sobre
 la horizontal y qué cara mira arriba) y el vaivén (desviación típica de la
 aceleración): `0` plano boca arriba, `1` plano boca abajo, `2` en bolsillo o mano
 (con vaivén), `3` inclinado y quieto (un soporte; no cuenta ni a favor ni en
@@ -252,7 +256,11 @@ por el reloj. Ahora:
   menos el 70 % de las lecturas, o la noche a oscuras (80 %) sin pasos ni
   movimiento, y nada en contra (pasos, móvil en el bolsillo o la mano).
 - **Sin evidencia la propuesta queda como dudosa**: confianza baja y marcada
-  `inferred`. Una sesión inferida no se guarda sola con «guardar sin preguntar»
+  `inferred`, y la propuesta lo dice («la hora de dormirte no está medida»).
+  La única excepción a la confianza baja es la noche colocada a tu hora
+  habitual cuando el hábito es firme (7 noches o más con hora real y 1 h de
+  variación como mucho) y la duración y el despertar medido encajan con él:
+  sube a media, nunca a alta, y sigue siendo inferida. Una sesión inferida no se guarda sola con «guardar sin preguntar»
   —se queda en la cola para que la corrijas—, puntúa siempre por debajo de
   cualquier propuesta medida de su misma noche (no es noche principal por
   defecto ni bloquea a las demás) y la sustituye cualquier propuesta medida que
@@ -265,7 +273,8 @@ por el reloj. Ahora:
   lo *reanuda* si el móvil estuvo encendido ese rato: antes, doce minutos de móvil
   a las 22:30 tras soltarlo a las 22:00 devolvían el inicio a las 22:00. En la
   capa web, los huecos del cargador, de Doze o de «no molestar» que abarquen un
-  uso sostenido (según el registro de pantalla) empiezan donde termina; y dos
+  uso sostenido (según el registro de pantalla, y sólo con desbloqueo: las
+  pantallas que enciende una notificación no son uso) empiezan donde termina; y dos
   huecos de pantalla separados por uno ya no se funden salvo que el primero sea
   un desvelo en mitad de la noche. Lo posterior abre un ciclo nuevo con su
   propio inicio.
@@ -367,7 +376,9 @@ martes 07:10 es «la noche del martes».
   32 min (mediana 8 → 11 min) al dejar de adelantar el inicio al hábito sin
   evidencia: 6 de las 18 noches etiquetadas salen dudosas, y las 12 firmes
   quedan a 16 min de media (7 min con el hábito ya aprendido). Con sensores de
-  quietud, el hábito vuelve a poder mover el inicio.
+  quietud, el hábito vuelve a poder mover el inicio. También da el error del
+  inicio por confianza (con el hábito aprendido: alta 0 min, media 45, baja 65),
+  que es lo que dice si la etiqueta de la propuesta es honesta.
 - **Render** ([`scripts/rendercheck.tsx`](scripts/rendercheck.tsx)) — cada
   pantalla se renderiza fuera del navegador para detectar errores de render.
 

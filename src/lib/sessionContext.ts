@@ -1,5 +1,6 @@
-import { DAY, HOUR, MINUTE } from './time';
+import { DAY, HOUR, MINUTE, formatDuration } from './time';
 import { TRIGGER_SHORT } from './triggers';
+import { SENSOR_BY_ID } from './sensors';
 import {
   LIGHT_BRIGHT,
   LIGHT_DARK,
@@ -837,6 +838,22 @@ const ALARM_TEXT: Record<string, string> = {
   none: 'sin alarma cerca del despertar',
 };
 const CONFIDENCE_TEXT = { high: 'alta', medium: 'media', low: 'baja' } as const;
+/** Motivos de descarte de un hueco, en corto (los largos están en `activityMonitor.ts`). */
+const DISCARD_TEXT: Record<string, string> = {
+  'trigger-off': 'disparador apagado',
+  implausible: 'fuera de la ventana nocturna o corto',
+  'too-long': 'demasiado largo para una noche',
+  'out-of-pattern': 'hueco corto fuera de tu hora',
+  secondary: 'ya había una noche principal',
+};
+/** Minutos con signo: «+15 min», «−5 min», «0 min». */
+const signedMin = (n: number) => `${n > 0 ? '+' : n < 0 ? '−' : ''}${Math.abs(Math.round(n))} min`;
+/** «UTC+2», «UTC−3:30»; undefined si el desfase no es un número. */
+function utc(offset: unknown): string | undefined {
+  if (typeof offset !== 'number' || !Number.isFinite(offset)) return undefined;
+  const a = Math.abs(Math.round(offset));
+  return `UTC${offset >= 0 ? '+' : '−'}${Math.floor(a / 60)}${a % 60 ? ':' + String(a % 60).padStart(2, '0') : ''}`;
+}
 
 function hm(min: number): string {
   const m = ((Math.round(min) % 1440) + 1440) % 1440;
@@ -846,12 +863,24 @@ function clock(ts: number): string {
   const d = new Date(ts);
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 }
+/**
+ * Duración legible: «45 s», «2 min 5 s», «1 h 2 min». Con espacios que no
+ * parten, para que una lista larga de usos no corte «5» de su «s» a 320 px.
+ */
 function secs(s: number): string {
-  if (s < 60) return `${s} s`;
+  const nb = '\u00a0';
+  if (s < 60) return `${s}${nb}s`;
+  if (s >= 3600) {
+    const h = Math.floor(s / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    return m ? `${h}${nb}h${nb}${m}${nb}min` : `${h}${nb}h`;
+  }
   const m = Math.floor(s / 60);
   const r = s % 60;
-  return r ? `${m} min ${r} s` : `${m} min`;
+  return r ? `${m}${nb}min${nb}${r}${nb}s` : `${m}${nb}min`;
 }
+/** Decimal con coma, como se escribe en español: 24,5. */
+const dec = (n: number) => String(n).replace('.', ',');
 const yesNo = (b: boolean | null | undefined) => (b === null || b === undefined ? undefined : b ? 'sí' : 'no');
 const pct = (n: number | undefined | null) => (n === undefined || n === null ? undefined : `${n} %`);
 
@@ -892,7 +921,7 @@ export function describeContext(ctx: SessionContext | undefined): ContextSection
       ['Modelo', d?.model ? [d.manufacturer, d.model].filter(Boolean).join(' ') : undefined],
       ['Android', d?.release ? `${d.release}${d.sdk ? ` (API ${d.sdk})` : ''}` : d?.sdk ? `API ${d.sdk}` : undefined],
       ['Versión de la app', d?.app],
-      ['Zona horaria', d?.tz ? `${d.tz} (UTC${d.tzOffsetMin >= 0 ? '+' : '−'}${Math.floor(Math.abs(d.tzOffsetMin) / 60)}${Math.abs(d.tzOffsetMin) % 60 ? ':' + String(Math.abs(d.tzOffsetMin) % 60).padStart(2, '0') : ''})` : undefined],
+      ['Zona horaria', d?.tz ? (utc(d.tzOffsetMin) ? `${d.tz} (${utc(d.tzOffsetMin)})` : d.tz) : undefined],
       ['Idioma', d?.locale],
       ['Exención de batería', yesNo(d?.batteryExempt)],
       ['Alarmas exactas', yesNo(d?.exactAlarms)],
@@ -912,7 +941,7 @@ export function describeContext(ctx: SessionContext | undefined): ContextSection
     const p = ctx.power;
     add('Batería y carga', [
       ['Batería', p?.battery ? `${p.battery.start ?? '?'} % → ${p.battery.end ?? '?'} % (de ${p.battery.min ?? '?'} a ${p.battery.max ?? '?'} %)` : undefined],
-      ['Temperatura de la batería', p?.tempC ? `${p.tempC.min} a ${p.tempC.max} °C` : undefined],
+      ['Temperatura de la batería', p?.tempC ? `${dec(p.tempC.min)} a ${dec(p.tempC.max)} °C` : undefined],
       ['Tiempo enchufado', pct(p?.chargingPct)],
       ['Enchufado / desenchufado', p ? `${p.plugs} / ${p.unplugs}` : undefined],
       ['Tipo de carga', fromTo(p?.chargeType, (v) => CHARGE_TEXT[v] ?? `código ${v}`)],
@@ -933,7 +962,7 @@ export function describeContext(ctx: SessionContext | undefined): ContextSection
 
     const n = ctx.sensors;
     add('Sensores', [
-      ['Activos para detectar', n ? (n.on.length ? n.on.join(', ') : 'ninguno') : undefined],
+      ['Activos para detectar', n ? (n.on.length ? n.on.map((id) => SENSOR_BY_ID[id]?.label ?? id).join(', ') : 'ninguno') : undefined],
       ['Pasos / movimiento', n?.steps ? `${n.steps.steps} pasos, ${n.steps.motions} avisos de movimiento` : undefined],
       ['Luz', n?.light ? `oscuro ${n.light.pct.dark} %, tenue ${n.light.pct.dim} %, claro ${n.light.pct.bright} %${n.light.luxMax !== undefined ? ` (${n.light.luxMin}–${n.light.luxMax} lux)` : ''}` : undefined],
       ['Proximidad', n?.proximity ? `tapado ${n.proximity.coveredPct ?? '?'} %, ${n.proximity.changes} cambios` : undefined],
@@ -958,11 +987,11 @@ export function describeContext(ctx: SessionContext | undefined): ContextSection
       ['Señales', a?.triggers?.length ? a.triggers.map((id) => TRIGGER_SHORT[id] ?? id).join(' + ') : undefined],
       ['Confianza', a ? `${CONFIDENCE_TEXT[a.confidence] ?? a.confidence}${a.score !== undefined ? ` (${Math.round(a.score * 100)} %)` : ''}` : undefined],
       ['Inicio sin medir', yesNo(a?.inferred)],
-      ['Hueco medido', a?.gapMin !== undefined ? secs(Math.round(a.gapMin * 60)) : undefined],
-      ['Ajuste del inicio / del final', a && (a.startShiftMin !== undefined || a.endShiftMin !== undefined) ? `${a.startShiftMin ?? 0} / ${a.endShiftMin ?? 0} min` : undefined],
+      ['Hueco medido', a?.gapMin !== undefined ? formatDuration(a.gapMin * MINUTE) : undefined],
+      ['Ajuste del inicio / del final', a && (a.startShiftMin !== undefined || a.endShiftMin !== undefined) ? `${signedMin(a.startShiftMin ?? 0)} / ${signedMin(a.endShiftMin ?? 0)}` : undefined],
       ['Latencia sumada', a?.latencyMin !== undefined ? `${Math.round(a.latencyMin)} min (${a.latencySource === 'learned' ? 'aprendida' : 'de ajustes'})` : undefined],
       ['Hábito en ese momento', a?.habit ? `${hm(a.habit.startMin)} – ${hm(a.habit.endMin)}${a.habit.n ? ` (${a.habit.n} noches)` : ' (del horario)'}` : undefined],
-      ['Huecos descartados esa noche', a?.discards?.length ? a.discards.map((x) => x.reason).join(', ') : undefined],
+      ['Huecos descartados esa noche', a?.discards?.length ? a.discards.map((x) => DISCARD_TEXT[x.reason] ?? x.reason).join('; ') : undefined],
     ]);
 
     if (ctx.partial) {

@@ -1118,6 +1118,36 @@ console.log('\n--- Precisión: exportación del contexto ---');
     threw = true;
   }
   assert('un contexto de otra versión o con otra forma no rompe la descripción', !threw);
+
+  // La traza se lee en español: sensores por su nombre, descartes por su motivo, ajustes con signo.
+  const traced = describeContext({
+    v: 1,
+    device: { app: '1.0.0', tz: 'Europe/Madrid', tzOffsetMin: 120 },
+    sensors: { on: ['steps', 'light'] },
+    algo: {
+      triggers: ['screen'], confidence: 'medium', inferred: false, gapMin: 485, startShiftMin: 15, endShiftMin: -5,
+      discards: [{ reason: 'out-of-pattern', startMin: 560, endMin: 740 }],
+    },
+  });
+  const row = (label: string) => traced.flatMap((x) => x.rows).find((r) => r.label === label)?.value;
+  assert('texto: los sensores activos se nombran, no con su código', row('Activos para detectar') === 'Pasos y movimiento, Luz ambiente', row('Activos para detectar'));
+  assert('texto: los huecos descartados dicen el motivo en español', row('Huecos descartados esa noche') === 'hueco corto fuera de tu hora', row('Huecos descartados esa noche'));
+  assert('texto: hueco en horas y ajustes con signo', row('Hueco medido') === '8h 5m' && row('Ajuste del inicio / del final') === '+15 min / −5 min',
+    [row('Hueco medido'), row('Ajuste del inicio / del final')]);
+  assert('texto: la zona horaria con su desfase', row('Zona horaria') === 'Europe/Madrid (UTC+2)', row('Zona horaria'));
+  const uses = describeContext({
+    v: 1,
+    screen: { ons: 2, unlocks: 2, glances: 0, nightUnlocks: 1, nightOns: 1, useSec: 3725, usesSec: [125, 3600], longestSec: 3600, onAtStart: false, onAtEnd: false },
+    power: { plugs: 0, unplugs: 0, chargingPct: null, tempC: { min: 24.5, max: 31 } },
+  }).flatMap((x) => x.rows);
+  const val = (label: string) => uses.find((r) => r.label === label)?.value.replace(/\u00a0/g, ' ');
+  assert('texto: duraciones con horas y sin partir «5 s» al final de línea',
+    val('Uso total') === '1 h 2 min' && val('Cada uso') === '2 min 5 s, 1 h' && !uses.find((r) => r.label === 'Cada uso')?.value.includes('5 s'),
+    [val('Uso total'), val('Cada uso')]);
+  assert('texto: temperatura con coma decimal', val('Temperatura de la batería') === '24,5 a 31 °C', val('Temperatura de la batería'));
+  const noOffset = describeContext({ v: 1, device: { app: '1', tz: 'Europe/Madrid' } } as unknown as SessionContext);
+  assert('texto: sin desfase guardado no sale «UTC−NaN»',
+    noOffset.flatMap((x) => x.rows).find((r) => r.label === 'Zona horaria')?.value === 'Europe/Madrid');
 }
 
 console.log('\n--- Precisión: la hora habitual como inicio (botón de las dudosas) ---');
@@ -1193,6 +1223,11 @@ console.log('\n--- Precisión: los eventos nuevos no mueven la detección ---');
     { at: at('2026-09-21T23:31:00'), kind: 'lux', v: 0 }, { at: at('2026-09-21T23:00:00'), kind: 'batt', v: 70 },
     { at: at('2026-09-22T02:00:00'), kind: 'net', v: 0 }, { at: at('2026-09-22T03:00:00'), kind: 'airplane', v: 1 },
     { at: at('2026-09-22T04:00:00'), kind: 'ringer', v: 0 }, { at: at('2026-09-22T05:00:00'), kind: 'bt', v: 1 },
+    // Con el contexto activo el servicio también anota la próxima alarma y el
+    // audio aunque esos sensores estén apagados: la detección no debe usarlos.
+    { at: at('2026-09-21T23:00:00'), kind: 'alarm', v: at('2026-09-22T07:00:00') },
+    { at: at('2026-09-22T02:00:00'), kind: 'audio', v: 1 }, { at: at('2026-09-22T02:40:00'), kind: 'audio', v: 0 },
+    { at: at('2026-09-22T07:00:30'), kind: 'screen-on' },
   ];
   const a = gatherEvidence(base, at('2026-09-21T23:30:00'), at('2026-09-22T07:30:00'), ['light', 'steps']);
   const b = gatherEvidence(extra, at('2026-09-21T23:30:00'), at('2026-09-22T07:30:00'), ['light', 'steps']);

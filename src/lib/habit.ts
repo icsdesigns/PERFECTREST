@@ -127,6 +127,15 @@ export function habitualStart(
   return best;
 }
 
+/**
+ * La sesión con la hora habitual como inicio, tras tocar el usuario el botón.
+ * Tocarla la revisa —deja de ser una deducción y pasa a editada—, sigue sin
+ * confirmar y no enseña el hábito (`habitStart`).
+ */
+export function withHabitStart(s: SleepSession, start: number): SleepSession {
+  return { ...s, start, source: 'edited', inferred: undefined, habitStart: true };
+}
+
 /** Inicio medido por el dispositivo; para sesiones viejas, el que recuerda el id. */
 export function detectedStartOf(s: SleepSession): number | null {
   if (s.detectedStart !== undefined) return s.detectedStart;

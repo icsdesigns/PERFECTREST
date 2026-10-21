@@ -1064,7 +1064,7 @@ function asNap(r: DetectionResult): DetectionResult {
 }
 
 /** Anota en la propuesta los huecos que se descartaron esa misma noche. */
-function withDiscards(r: DetectionResult, rejected: RejectedGap[]): DetectionResult {
+export function withDiscards(r: DetectionResult, rejected: RejectedGap[]): DetectionResult {
   const key = nightKey(r.session.start, r.session.end);
   const same = rejected
     .filter((x) => nightKey(x.gap.start, x.gap.end) === key)

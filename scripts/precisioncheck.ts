@@ -15,6 +15,7 @@ import {
   evaluateGap,
   evaluateGaps,
   proposeFromSchedule,
+  withDiscards,
   refineEdges,
   supersedesPending,
 } from '../src/lib/activityMonitor';
@@ -24,6 +25,7 @@ import { parseNote } from '../src/lib/noteTimes';
 import {
   LIGHT_BRIGHT,
   LIGHT_DARK,
+  LIGHT_DIM,
   NO_EVIDENCE,
   POSTURE_CARRIED,
   POSTURE_FLAT_DOWN,
@@ -38,9 +40,26 @@ import {
 import { DEFAULT_SENSORS, activeSensors } from '../src/lib/sensors';
 import { DEFAULT_GOALS } from '../src/lib/schedule';
 import { DEFAULT_TRIGGERS } from '../src/lib/triggers';
-import { rawEventsToCsv, rawEventsToJson } from '../src/lib/exportSessions';
-import { HOUR, MINUTE, formatDuration } from '../src/lib/time';
-import type { MonitorSettings, ScheduleSettings, SleepSession } from '../src/lib/types';
+import { rawEventsToCsv, rawEventsToJson, sessionsToCsv, sessionsToJson } from '../src/lib/exportSessions';
+import { habitualStart, knownStart, withHabitStart } from '../src/lib/habit';
+import {
+  CONTEXT_COLUMNS,
+  MAX_CONTEXTS,
+  MAX_CONTEXT_BYTES,
+  buildAlgo,
+  buildContext,
+  buildDevice,
+  describeContext,
+  flattenContext,
+  migrateSession,
+  needsContext,
+  pruneContexts,
+  sanitizeContext,
+  stripContexts,
+  summarizeState,
+} from '../src/lib/sessionContext';
+import { DAY, HOUR, MINUTE, formatDuration } from '../src/lib/time';
+import type { MonitorSettings, ScheduleSettings, SensorId, SessionContext, SleepSession } from '../src/lib/types';
 
 let failures = 0;
 function assert(name: string, cond: boolean, extra?: unknown) {
@@ -65,6 +84,8 @@ const MON: MonitorSettings = {
   wakeSummary: true,
   triggers: { ...DEFAULT_TRIGGERS },
   sensors: { ...DEFAULT_SENSORS },
+  saveContext: true,
+  contextSince: 0,
 };
 const gap = (from: string, to: string, extra: Partial<NativeGap> = {}): NativeGap => ({
   start: at(from),
@@ -842,6 +863,341 @@ console.log('\n--- Precisión: exportación del registro bruto ---');
   const json = JSON.parse(rawEventsToJson(events)) as RawEvent[];
   assert('el JSON conserva los eventos tal cual y ordenados',
     json.length === 2 && json[0].kind === 'screen-off' && json[1].v === 40);
+}
+
+// --- Contexto del dispositivo de cada noche ---------------------------------
+
+console.log('\n--- Precisión: contexto del dispositivo ---');
+{
+  const ev = (t: string, kind: RawEvent['kind'], v?: number): RawEvent => ({ at: at(t), kind, ...(v === undefined ? {} : { v }) });
+  const start = at('2026-09-21T23:20:00');
+  const end = at('2026-09-22T07:10:00');
+  const now = at('2026-09-22T09:30:00');
+  const night: RawEvent[] = [
+    // Estado de la tarde (lecturas de refresco del servicio).
+    ev('2026-09-21T22:00:00', 'batt', 80), ev('2026-09-21T22:00:00', 'chg-type', 0), ev('2026-09-21T22:00:00', 'net', 1),
+    ev('2026-09-21T22:00:00', 'airplane', 0), ev('2026-09-21T22:00:00', 'ringer', 2), ev('2026-09-21T22:00:00', 'powersave', 0),
+    ev('2026-09-21T22:00:00', 'dnd-mode', 1), ev('2026-09-21T22:00:00', 'bt', 0), ev('2026-09-21T22:00:00', 'bright', 40),
+    ev('2026-09-21T22:00:00', 'orient', 1), ev('2026-09-21T22:00:00', 'batt-temp', 310),
+    // Uso del móvil antes de acostarse: 25 min.
+    ev('2026-09-21T22:55:00', 'screen-on'), ev('2026-09-21T22:55:02', 'unlock'), ev('2026-09-21T23:20:00', 'screen-off'),
+    ev('2026-09-21T22:50:00', 'light', LIGHT_BRIGHT), ev('2026-09-21T22:50:00', 'lux', 300),
+    ev('2026-09-21T23:00:00', 'audio', 1), ev('2026-09-21T23:10:00', 'audio', 1), ev('2026-09-21T23:20:00', 'audio', 1),
+    ev('2026-09-21T23:25:00', 'audio', 0),
+    ev('2026-09-21T23:21:00', 'light', LIGHT_DARK), ev('2026-09-21T23:21:00', 'lux', 0),
+    ev('2026-09-21T23:10:00', 'alarm', at('2026-09-22T07:00:00')),
+    // Se enchufa y se silencia.
+    ev('2026-09-21T23:22:00', 'plug'), ev('2026-09-21T23:22:00', 'chg-type', 2), ev('2026-09-21T23:22:00', 'batt', 79),
+    ev('2026-09-21T23:25:00', 'dnd-mode', 2), ev('2026-09-21T23:25:00', 'ringer', 1),
+    ev('2026-09-22T01:00:00', 'airplane', 1), ev('2026-09-22T05:30:00', 'airplane', 0),
+    ev('2026-09-22T02:00:00', 'net', 0), ev('2026-09-22T06:00:00', 'net', 1),
+    ev('2026-09-22T01:30:00', 'batt-temp', 360),
+    // Un vistazo sin desbloquear y un micro-despertar de dos minutos.
+    ev('2026-09-22T03:10:00', 'screen-on'), ev('2026-09-22T03:10:08', 'screen-off'),
+    ev('2026-09-22T04:00:00', 'screen-on'), ev('2026-09-22T04:00:03', 'unlock'), ev('2026-09-22T04:02:00', 'screen-off'),
+    ev('2026-09-22T05:00:00', 'batt', 95),
+    ev('2026-09-22T06:30:00', 'light', LIGHT_DIM),
+    ev('2026-09-22T02:00:00', 'posture', POSTURE_FLAT_UP), ev('2026-09-22T02:10:00', 'posture', POSTURE_FLAT_DOWN),
+    ev('2026-09-22T02:20:00', 'posture', POSTURE_FLAT_UP), ev('2026-09-22T02:30:00', 'posture', POSTURE_CARRIED),
+    // Suena la alarma y se atiende.
+    ev('2026-09-22T07:00:05', 'screen-on'), ev('2026-09-22T07:00:10', 'unlock'), ev('2026-09-22T07:03:00', 'screen-off'),
+    ev('2026-09-22T07:01:00', 'steps', 12),
+    ev('2026-09-22T07:04:00', 'unplug'), ev('2026-09-22T07:04:00', 'chg-type', 0),
+  ];
+  const sensorsOn: SensorId[] = ['steps', 'light', 'posture'];
+  const ctx = buildContext({ start, end, events: night, now, sensorsOn });
+
+  assert('el tramo es de media hora antes del inicio a media hora después del final',
+    ctx.from === start - 30 * MINUTE && ctx.to === end + 30 * MINUTE && ctx.span?.start === start && ctx.span?.end === end);
+  assert('el registro cubría el tramo: no es parcial', !ctx.partial);
+
+  const scr = ctx.screen!;
+  assert('pantalla: 4 encendidos, 3 desbloqueos y 1 vistazo sin desbloquear',
+    scr.ons === 4 && scr.unlocks === 3 && scr.glances === 1, scr);
+  assert('pantalla: 2 micro-despertares dentro de la noche (el de las 4 y el de la alarma)',
+    scr.nightUnlocks === 2 && scr.nightOns === 3, scr);
+  assert('pantalla: duración de cada uso en segundos (25 min, 2 min, 2 min 55 s)',
+    scr.usesSec.length === 3 && scr.usesSec[0] === 1500 && scr.usesSec[1] === 120 && scr.usesSec[2] === 175 && scr.longestSec === 1500,
+    scr.usesSec);
+  assert('pantalla: apagada al dormirse y al despertar (se apagó a las 7:03)', scr.onAtStart === false && scr.onAtEnd === false, [scr.onAtStart, scr.onAtEnd]);
+
+  const pow = ctx.power!;
+  assert('carga: enchufado una vez y desenchufado una, casi toda la noche',
+    pow.plugs === 1 && pow.unplugs === 1 && pow.chargingPct !== null && pow.chargingPct >= 84 && pow.chargingPct <= 90, pow);
+  assert('batería: al dormirse 80 %, al despertar 95 %', pow.battery?.start === 80 && pow.battery?.end === 95 && pow.battery?.max === 95, pow.battery);
+  assert('batería: temperatura máxima en °C', pow.tempC?.max === 36 && pow.tempC?.min === 31, pow.tempC);
+  assert('carga: tipo USB tras enchufar, sin carga al desenchufar', pow.chargeType?.end === 0 && pow.chargeType?.pct?.['2'] !== undefined, pow.chargeType);
+
+  const sys = ctx.system!;
+  assert('red: Wi-Fi al inicio y al final, y unas cuatro horas sin conexión',
+    sys.net?.start === 1 && sys.net?.end === 1 && (sys.net.pct?.['0'] ?? 0) >= 40 && (sys.net.pct?.['0'] ?? 0) <= 50, sys.net);
+  assert('modo avión: la mitad del tramo', (sys.airplane?.pct?.['1'] ?? 0) >= 48 && (sys.airplane?.pct?.['1'] ?? 0) <= 54, sys.airplane);
+  assert('no molestar pasa de «todo» a «prioritarias»; el timbre, de normal a vibrar',
+    sys.dnd?.start === 1 && sys.dnd?.end === 2 && sys.ringer?.start === 2 && sys.ringer?.end === 1);
+  assert('brillo y orientación al dormirse', sys.bright?.start === 40 && sys.orient?.start === 1);
+  assert('los parámetros sin datos no aparecen (no hay Doze ni ahorro de energía anotado en la noche)',
+    sys.doze === undefined && sys.powerSave?.pct?.['0'] === 100, sys);
+
+  const sen = ctx.sensors!;
+  assert('sensores: sólo los activos para detectar (pasos, luz, postura); proximidad no',
+    sen.on.join() === 'steps,light,posture' && sen.proximity === undefined && sen.steps?.steps === 12);
+  assert('luz: la mayor parte oscuro, con los lux de los cambios',
+    sen.light !== undefined && sen.light.pct.dark >= 78 && sen.light.luxMax === 300 && sen.light.luxMin === 0, sen.light);
+  assert('postura: 4 lecturas, 75 % plano', sen.posture?.readings === 4 && sen.posture?.flatPct === 75, sen.posture);
+  assert('audio (aunque no sea sensor activo): una reproducción, el 5 % del tramo',
+    sen.audio?.starts === 1 && sen.audio.playingPct >= 4 && sen.audio.playingPct <= 6, sen.audio);
+  assert('alarma: sonó a las 7:00, diez minutos antes de despertar, con la pantalla encendida',
+    sen.alarm?.status === 'rang' && sen.alarm.deltaMin === -10 && sen.alarm.setAtStart === true, sen.alarm);
+
+  // La alarma cancelada: la hora cambia antes de que llegue.
+  const cancelled = buildContext({
+    start, end, now, sensorsOn: [], events: [
+      ev('2026-09-21T23:21:00', 'alarm', at('2026-09-22T07:00:00')),
+      ev('2026-09-22T02:00:00', 'alarm', 0),
+      ev('2026-09-22T07:00:05', 'screen-on'),
+    ],
+  });
+  assert('alarma cancelada antes de sonar', cancelled.sensors?.alarm?.status === 'cancelled', cancelled.sensors?.alarm);
+  const future = buildContext({ start, end, now: end - HOUR, sensorsOn: [], events: night });
+  assert('si aún no ha llegado su hora, la alarma queda pendiente y el tramo se corta en el presente',
+    future.sensors?.alarm?.status === 'pending' && future.to === end - HOUR);
+
+  assert('línea de tiempo acotada y en minutos desde el inicio',
+    (ctx.timeline?.length ?? 0) > 0 && ctx.timeline!.length <= 40 && ctx.timeline!.some((t) => t[1] === 'plug' && t[0] === 2), ctx.timeline);
+
+  // Tamaño y privacidad.
+  const big: RawEvent[] = [];
+  const kinds: RawEvent['kind'][] = ['unlock', 'screen-on', 'screen-off', 'net', 'batt', 'bt', 'steps', 'light', 'posture', 'audio', 'alarm', 'ringer'];
+  for (let i = 0; i < 3000; i++) big.push({ at: start - HOUR + i * 9_000, kind: kinds[i % kinds.length], v: i % 3 });
+  const huge = buildContext({ start, end, events: big, now, sensorsOn: ['steps', 'light', 'proximity', 'posture', 'audio', 'alarm'] });
+  assert(`con 3000 eventos el contexto sigue por debajo de ${MAX_CONTEXT_BYTES} bytes`,
+    JSON.stringify(huge).length < MAX_CONTEXT_BYTES, JSON.stringify(huge).length);
+  assert('un contexto normal ocupa unos pocos cientos de bytes', JSON.stringify(ctx).length < 3500, JSON.stringify(ctx).length);
+
+  const keys = new Set<string>();
+  const walk = (x: unknown) => {
+    if (Array.isArray(x)) x.forEach(walk);
+    else if (x && typeof x === 'object') for (const [k, v] of Object.entries(x)) { keys.add(k); walk(v); }
+  };
+  walk({ ...ctx, device: buildDevice({ start, appVersion: '1.2.3', snapshot: { device: { model: 'Pixel 8', sdk: 34, ssid: 'MiCasa', imei: '123', serial: 'X' } as Record<string, unknown> }, status: { batteryExempt: true, exactAlarms: true, notifications: true } }) });
+  const forbidden = [...keys].filter((k) => /ssid|mac|imei|serial|latitude|longitude|location|package|account|email|phone|contact|device_?name|androidid/i.test(k));
+  assert('privacidad: ningún campo de ubicación, SSID, identificadores ni nombres', forbidden.length === 0, forbidden);
+
+  // Sin registro: igualmente un contexto, marcado como parcial.
+  const empty = buildContext({ start, end, events: [], now, sensorsOn: [] });
+  assert('sin registro bruto hay contexto parcial y sin secciones inventadas',
+    empty.partial === true && empty.screen === undefined && empty.power === undefined && empty.system === undefined);
+  const late = buildContext({ start, end, events: night.filter((e) => e.at > start + 2 * HOUR), now, sensorsOn: [] });
+  assert('si el registro empieza tarde, parcial', late.partial === true);
+
+  // summarizeState en sí.
+  const net: RawEvent[] = [ev('2026-09-21T22:00:00', 'net', 1), ev('2026-09-21T23:00:00', 'net', 0)];
+  const sm = summarizeState(net, at('2026-09-21T22:30:00'), at('2026-09-21T23:30:00'), at('2026-09-21T22:45:00'), at('2026-09-21T23:15:00'), true)!;
+  assert('summarizeState: reparto, inicio, fin y cambios', sm.start === 1 && sm.end === 0 && sm.changes === 1 && sm.pct?.['1'] === 50 && sm.pct?.['0'] === 50, sm);
+  assert('summarizeState: sin eventos no hay resumen', summarizeState([], 0, 10, 0, 10, true) === undefined);
+
+  // Datos del aparato.
+  const dev = buildDevice({
+    start, appVersion: '0.9.0', locale: 'es-ES', tz: 'Europe/Madrid',
+    snapshot: { device: { model: ' Pixel 8 ', manufacturer: 'Google', sdk: 34.0, release: '14', app: 123 as unknown as string }, sensors: { light: { available: true }, steps: { available: false } } },
+    status: { batteryExempt: false, exactAlarms: true, notifications: true },
+  });
+  assert('aparato: modelo recortado, versión de la web si el servicio no da la suya, y qué sensores trae',
+    dev.model === 'Pixel 8' && dev.sdk === 34 && dev.release === '14' && dev.app === '0.9.0' && dev.locale === 'es-ES' &&
+      dev.tz === 'Europe/Madrid' && dev.hasSensors?.light === true && dev.hasSensors?.steps === false && dev.batteryExempt === false, dev);
+  assert('aparato: el desfase horario es el del momento de dormirse',
+    dev.tzOffsetMin === -new Date(start).getTimezoneOffset());
+  const web = buildDevice({ start, appVersion: '0.9.0' });
+  assert('en el navegador (sin servicio) el aparato sólo lleva lo que se sabe', web.model === undefined && web.app === '0.9.0');
+}
+
+console.log('\n--- Precisión: traza del algoritmo en el contexto ---');
+{
+  const start = at('2026-09-21T23:40:00');
+  const end = at('2026-09-22T07:05:00');
+  const refined: SleepSession = {
+    id: 'auto-1', start, end, source: 'auto', confidence: 'low', confirmed: false, inferred: true,
+    triggers: ['screen', 'charger'], detectedStart: start - 20 * MINUTE, detectedEnd: end - 5 * MINUTE,
+  };
+  const algo = buildAlgo({
+    result: {
+      session: refined, gapMs: 8 * HOUR, score: 0.456,
+      evidence: { activityAt: start, wakeAt: null, dark: 0.912, moves: 0, flat: null, alarmAt: null, alarmMatch: true, sensors: ['light'] },
+      discards: [{ reason: 'secondary', start: end + HOUR, end: end + 4 * HOUR }],
+    },
+    refined, habit: { startMin: 23 * 60 + 40, endMin: 7 * 60, n: 6, spreadMin: 14.4 },
+    latencyMin: 12.34, latencySource: 'learned', sensors: ['light'],
+  });
+  assert('traza: disparadores, confianza, inferida, puntuación y hueco medido',
+    algo.triggers.join() === 'screen,charger' && algo.confidence === 'low' && algo.inferred && algo.score === 0.46 && algo.gapMin === 480, algo);
+  assert('traza: cuánto movió el refinado el inicio y el final', algo.startShiftMin === 20 && algo.endShiftMin === 5, algo);
+  assert('traza: latencia usada y su origen, y el hábito aprendido en ese momento',
+    algo.latencyMin === 12.3 && algo.latencySource === 'learned' && algo.habit?.startMin === 1420 && algo.habit?.n === 6 && algo.habit?.spreadMin === 14, algo);
+  assert('traza: la evidencia de los sensores y el motivo de descarte de la misma noche',
+    algo.evidence?.dark === 0.91 && algo.discards?.[0].reason === 'secondary' && algo.discards[0].startMin > 0, algo);
+  const noEv = buildAlgo({ result: { session: refined, gapMs: 0 }, refined, sensors: [] });
+  assert('traza sin evidencia ni descartes no los inventa', noEv.evidence === undefined && noEv.discards === undefined && noEv.gapMin === undefined);
+}
+
+console.log('\n--- Precisión: migración y limpieza de contextos ---');
+{
+  const mk = (i: number, extra: Partial<SleepSession> = {}): SleepSession => ({
+    id: `s${i}`, start: at('2026-09-20T23:00:00') - i * DAY, end: at('2026-09-21T07:00:00') - i * DAY,
+    source: 'auto', confidence: 'high', confirmed: true, context: { v: 1, collected: 1, span: { start: 0, end: 0 } }, ...extra,
+  });
+  const nowTs = at('2026-09-22T12:00:00');
+  assert('sanitizeContext: acepta un objeto con versión y rechaza lo demás',
+    !!sanitizeContext({ v: 1 }) && !sanitizeContext(null) && !sanitizeContext('x') && !sanitizeContext([]) && !sanitizeContext({}) && !sanitizeContext({ v: 'a' }));
+  assert('sanitizeContext: rechaza lo desmesurado', sanitizeContext({ v: 1, x: 'y'.repeat(MAX_CONTEXT_BYTES) }) === undefined);
+
+  const old: SleepSession = { id: 'old', start: 1, end: 2, source: 'manual', confidence: 'high', confirmed: true };
+  assert('migrar una sesión anterior a la función no la toca', migrateSession(old) === old);
+  const broken = migrateSession({ ...old, context: 'basura' as unknown as SessionContext });
+  assert('un contexto roto se suelta y la sesión se conserva', !('context' in broken) && broken.id === 'old');
+
+  const many = Array.from({ length: 150 }, (_, i) => mk(i));
+  const pruned = pruneContexts(many, nowTs);
+  assert(`se conservan los contextos de las ${MAX_CONTEXTS} noches más recientes y ninguna sesión se pierde`,
+    pruned.length === 150 && pruned.filter((s) => s.context).length === MAX_CONTEXTS &&
+      !!pruned[MAX_CONTEXTS - 1].context && !pruned[MAX_CONTEXTS].context);
+  const ancient = pruneContexts([mk(0), mk(400)], nowTs);
+  assert('un contexto de hace más de un año se suelta', !!ancient[0].context && !ancient[1].context && ancient.length === 2);
+  const few = [mk(0), mk(1)];
+  assert('si no hay nada que soltar devuelve el mismo array', pruneContexts(few, nowTs) === few);
+  assert('stripContexts quita todos los contextos', stripContexts(many).every((s) => !s.context) && stripContexts(many).length === 150);
+
+  // Cuándo hay que recoger.
+  const fresh: SleepSession = { ...old, id: 'f', start: nowTs - 10 * HOUR, end: nowTs - 2 * HOUR };
+  assert('recoger: una noche reciente sin contexto, sí', needsContext(fresh, nowTs, 0));
+  assert('recoger: no si acabó antes de «desde» (se borraron los contextos)', !needsContext(fresh, nowTs, nowTs - HOUR));
+  assert('recoger: no si el registro bruto ya no la alcanza', !needsContext({ ...fresh, start: nowTs - 6 * DAY, end: nowTs - 5 * DAY }, nowTs, 0));
+  const done = { ...fresh, context: buildContext({ start: fresh.start, end: fresh.end, events: [], now: nowTs, sensorsOn: [] }) };
+  assert('recoger: ya recogido y completo, no', !needsContext(done, nowTs, 0));
+  assert('recoger: si se corrigió el inicio, sí', needsContext({ ...done, start: done.start - 20 * MINUTE }, nowTs, 0));
+  const early = { ...fresh, context: buildContext({ start: fresh.start, end: fresh.end, events: [], now: fresh.end + 5 * MINUTE, sensorsOn: [] }) };
+  assert('recoger: el tramo estaba sin terminar y ya ha pasado la media hora, sí', needsContext(early, nowTs, 0));
+  assert('recoger: pero no antes de que pase', !needsContext(early, fresh.end + 10 * MINUTE, 0));
+}
+
+console.log('\n--- Precisión: exportación del contexto ---');
+{
+  const start = at('2026-09-21T23:20:00');
+  const end = at('2026-09-22T07:10:00');
+  const events: RawEvent[] = [
+    { at: start - HOUR, kind: 'batt', v: 80 }, { at: start - HOUR, kind: 'net', v: 1 },
+    { at: start + HOUR, kind: 'unlock' }, { at: start + HOUR, kind: 'screen-on' }, { at: start + HOUR + 60_000, kind: 'screen-off' },
+  ];
+  const context = buildContext({
+    start, end, events, now: end + HOUR, sensorsOn: [],
+    device: buildDevice({ start, appVersion: '1.0.0', snapshot: { device: { model: 'Pixel 8', sdk: 34 } } }),
+  });
+  const withCtx: SleepSession = { id: 'a', start, end, source: 'auto', confidence: 'high', confirmed: true, context };
+  const without: SleepSession = { id: 'b', start: start - DAY, end: end - DAY, source: 'manual', confidence: 'high', confirmed: true, note: 'a, "b"' };
+  const csv = sessionsToCsv([withCtx, without]).replace('﻿', '').split('\r\n');
+  const header = csv[0].split(',');
+  assert('CSV: las columnas de siempre siguen donde estaban', header.slice(0, 9).join() === 'fecha,inicio,fin,horas,origen,confianza,confirmada,calidad,nota');
+  assert('CSV: después van inferida, inicio_habitual y las columnas del contexto',
+    header[9] === 'inferida' && header[10] === 'inicio_habitual' && header.length === 11 + CONTEXT_COLUMNS.length, header.length);
+  const col = (row: string, name: string) => row.split(',')[header.indexOf(name)];
+  assert('CSV: la noche con contexto lleva modelo, batería y desbloqueos', col(csv[2], 'ctx_modelo') === 'Pixel 8' && col(csv[2], 'bateria_inicio') === '80' && col(csv[2], 'pantalla_desbloqueos') === '1', csv[2]);
+  assert('CSV: la noche sin contexto deja esas columnas vacías, con las mismas columnas',
+    csv[1].split(',').length >= header.length && col(csv[1], 'ctx_modelo') === '' && col(csv[1], 'bateria_inicio') === '');
+  const json = JSON.parse(sessionsToJson([withCtx, without])) as SleepSession[];
+  assert('JSON: el contexto va anidado tal como se guarda', json[1].context?.device?.model === 'Pixel 8' && json[1].context?.screen?.unlocks === 1 && json[0].context === undefined);
+  assert('aplanar sin contexto da una fila vacía', Object.keys(flattenContext(undefined)).length === 0);
+
+  const sections = describeContext(context);
+  const labels = sections.map((s) => s.title);
+  assert('texto en español: aparato, pantalla y batería y carga', ['Aparato', 'Pantalla', 'Batería y carga'].every((t) => labels.includes(t)), labels);
+  assert('texto en español: la red se dice sin nombres', sections.some((s) => s.rows.some((r) => r.label === 'Red' && r.value.startsWith('Wi-Fi'))));
+  let threw = false;
+  try {
+    describeContext({ v: 1, screen: 5, power: 'x', sensors: { alarm: { status: 'otra' } }, algo: { triggers: 7 } } as unknown as SessionContext);
+    describeContext({ v: 9, futuro: true } as unknown as SessionContext);
+  } catch {
+    threw = true;
+  }
+  assert('un contexto de otra versión o con otra forma no rompe la descripción', !threw);
+}
+
+console.log('\n--- Precisión: la hora habitual como inicio (botón de las dudosas) ---');
+{
+  const habit = { startMin: 23 * 60 + 40, endMin: 7 * 60, n: 6, spreadMin: 15 };
+  const end = at('2026-09-22T07:10:00');
+  const hhmm = (ts: number | null) => (ts === null ? null : new Date(ts).toTimeString().slice(0, 5));
+  assert('ofrece la hora habitual de la noche anterior cuando el inicio está lejos',
+    hhmm(habitualStart({ start: at('2026-09-22T02:30:00'), end }, habit)) === '23:40' &&
+      habitualStart({ start: at('2026-09-22T02:30:00'), end }, habit)! < at('2026-09-22T00:00:00'));
+  assert('también si el inicio deducido es anterior a la hora habitual',
+    hhmm(habitualStart({ start: at('2026-09-21T21:00:00'), end }, habit)) === '23:40');
+  assert('no ofrece nada si el inicio ya está a menos de 10 minutos de la hora habitual',
+    habitualStart({ start: at('2026-09-21T23:35:00'), end }, habit) === null);
+  assert('no ofrece la meta del horario como «lo que sueles» (hábito sin noches)',
+    habitualStart({ start: at('2026-09-22T02:30:00'), end }, { ...habit, n: 0 }) === null && habitualStart({ start: 1, end }, null) === null);
+  assert('no ofrece una hora que deje menos de 3 h de sueño',
+    habitualStart({ start: at('2026-09-22T05:30:00'), end: at('2026-09-22T07:10:00') }, { ...habit, startMin: 5 * 60 }) === null);
+
+  const inferred: SleepSession = {
+    id: 'auto-9', start: at('2026-09-22T02:30:00'), end, source: 'auto', confidence: 'low', confirmed: false, inferred: true,
+  };
+  const applied = withHabitStart(inferred, at('2026-09-21T23:40:00'));
+  assert('aplicarla revisa la sesión: editada, ya no inferida, sigue sin confirmar',
+    applied.start === at('2026-09-21T23:40:00') && applied.source === 'edited' && !applied.inferred && applied.habitStart === true && !applied.confirmed);
+  assert('la original no se muta (nunca se aplica sola)', inferred.inferred === true && inferred.source === 'auto');
+
+  // No enseña el hábito: una noche con la hora habitual puesta por el usuario no cuenta.
+  assert('una hora habitual aplicada no cuenta como hora real de acostarse', knownStart({ ...applied, confirmed: true }) === null);
+  assert('pero una hora que el usuario escribió en el comentario, sí', knownStart({ ...applied, note: 'me dormí a las 00:15' }) !== null);
+  const sched: ScheduleSettings = { mode: 'uniform', goals: { ...DEFAULT_GOALS } };
+  const nights: SleepSession[] = Array.from({ length: 6 }, (_, i) => ({
+    id: `m${i}`, start: at('2026-09-10T23:00:00') + i * DAY, end: at('2026-09-11T07:00:00') + i * DAY,
+    source: 'manual' as const, confidence: 'high' as const, confirmed: true,
+  }));
+  const h1 = learnHabit(nights, sched, at('2026-09-20T12:00:00'));
+  const h2 = learnHabit([...nights, ...Array.from({ length: 6 }, (_, i) => ({ ...applied, id: `h${i}`, confirmed: true, start: at('2026-09-12T01:30:00') + i * DAY, end: at('2026-09-12T09:00:00') + i * DAY }))], sched, at('2026-09-20T12:00:00'));
+  assert('el hábito aprendido no cambia por las noches con la hora habitual aplicada', h1.n === h2.n && Math.abs(h1.startMin - h2.startMin) < 1, [h1, h2]);
+}
+
+console.log('\n--- Precisión: huecos descartados de la misma noche en la traza ---');
+{
+  const habit = learnHabit(
+    Array.from({ length: 6 }, (_, i) => ({
+      id: `m${i}`, start: at('2026-09-10T23:30:00') + i * DAY, end: at('2026-09-11T07:15:00') + i * DAY,
+      source: 'manual' as const, confidence: 'high' as const, confirmed: true,
+    })),
+    flat,
+    at('2026-09-20T12:00:00'),
+  );
+  const nightGap = gap('2026-09-21T23:35:00', '2026-09-22T07:20:00');
+  // Una mañana quieta después de la noche: no es sueño, y la evaluación la deja en el descarte.
+  const morning = gap('2026-09-22T08:40:00', '2026-09-22T11:50:00');
+  const { results, rejected } = evaluateGaps([nightGap, morning], MON, { habit });
+  const night = results.find((r) => r.session.end === nightGap.end);
+  assert('la noche se propone y el hueco de la mañana se descarta', !!night && rejected.length >= 1, [results.length, rejected.length]);
+  const traced = night ? withDiscards(night, rejected) : null;
+  assert('la propuesta anota los descartes de su noche, con el motivo',
+    !!traced && (traced.discards?.length ?? 0) >= 1 && !!traced.discards?.every((d) => typeof d.reason === 'string'),
+    traced?.discards);
+  assert('sin descartes la propuesta queda tal cual', night !== undefined && withDiscards(night, []) === night);
+}
+
+console.log('\n--- Precisión: los eventos nuevos no mueven la detección ---');
+{
+  const base: RawEvent[] = [
+    { at: at('2026-09-21T22:30:00'), kind: 'light', v: LIGHT_BRIGHT },
+    { at: at('2026-09-21T23:30:00'), kind: 'light', v: LIGHT_DARK },
+    { at: at('2026-09-22T01:00:00'), kind: 'steps', v: 20 },
+  ];
+  const extra: RawEvent[] = [
+    ...base,
+    { at: at('2026-09-21T23:31:00'), kind: 'lux', v: 0 }, { at: at('2026-09-21T23:00:00'), kind: 'batt', v: 70 },
+    { at: at('2026-09-22T02:00:00'), kind: 'net', v: 0 }, { at: at('2026-09-22T03:00:00'), kind: 'airplane', v: 1 },
+    { at: at('2026-09-22T04:00:00'), kind: 'ringer', v: 0 }, { at: at('2026-09-22T05:00:00'), kind: 'bt', v: 1 },
+  ];
+  const a = gatherEvidence(base, at('2026-09-21T23:30:00'), at('2026-09-22T07:30:00'), ['light', 'steps']);
+  const b = gatherEvidence(extra, at('2026-09-21T23:30:00'), at('2026-09-22T07:30:00'), ['light', 'steps']);
+  assert('la evidencia es idéntica con y sin los eventos de contexto', JSON.stringify(a) === JSON.stringify(b), [a, b]);
+  assert('el último uso sostenido tampoco cambia', lastSustainedUse(base, 0, Date.now()) === lastSustainedUse(extra, 0, Date.now()));
 }
 
 console.log(failures ? `\n${failures} comprobación(es) fallidas` : '\nTodo correcto');

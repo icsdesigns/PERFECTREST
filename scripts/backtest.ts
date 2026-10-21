@@ -69,6 +69,8 @@ const MON: MonitorSettings = {
   wakeSummary: true,
   triggers: { ...DEFAULT_TRIGGERS },
   sensors: { ...DEFAULT_SENSORS },
+  saveContext: true,
+  contextSince: 0,
 };
 const SCHEDULE: ScheduleSettings = { mode: 'uniform', goals: { ...DEFAULT_GOALS } };
 const LATENCY = 15;

@@ -22,7 +22,7 @@ import {
   writeScheduleMark,
   type DetectionResult,
 } from '../lib/activityMonitor';
-import { learnHabit, learnLatency } from '../lib/habit';
+import { learnHabit, learnLatency, withHabitStart } from '../lib/habit';
 import {
   buildAlgo,
   contextFromAlgo,
@@ -209,9 +209,7 @@ function reducer(state: AppState, action: Action): AppState {
       // Tocarla la revisa: deja de ser una deducción. Sigue sin confirmar y
       // editable, y no enseña el hábito (`habitStart`).
       const apply = (s: SleepSession): SleepSession =>
-        s.id === action.id
-          ? { ...s, start: action.start, source: 'edited', inferred: undefined, habitStart: true }
-          : s;
+        s.id === action.id ? withHabitStart(s, action.start) : s;
       return { ...state, pendingSessions: state.pendingSessions.map(apply) };
     }
 

@@ -13,6 +13,7 @@ import { CyclesScreen } from '../src/screens/CyclesScreen';
 import { StatsScreen } from '../src/screens/StatsScreen';
 import { SettingsScreen } from '../src/screens/SettingsScreen';
 import { SessionSheet } from '../src/components/SessionSheet';
+import { buildContext, buildDevice } from '../src/lib/sessionContext';
 import type { SleepSession } from '../src/lib/types';
 
 let failures = 0;
@@ -64,6 +65,10 @@ check('Ajustes', wrap(<SettingsScreen />), [
   'Probar un disparador',
   'Reposo profundo del sistema',
   'Modo «No molestar»',
+  // La privacidad del contexto: el interruptor y el borrado tienen que estar a la vista.
+  'Guardar contexto del dispositivo con cada noche',
+  'Nunca ubicación',
+  'Borrar contextos guardados',
 ]);
 
 const demo: SleepSession = {
@@ -81,6 +86,48 @@ check('Hoja de sesión', <SessionSheet session={demo} onSave={() => {}} onClose=
 check('Hoja de sesión con inicio inferido',
   <SessionSheet session={{ ...demo, confidence: 'low', inferred: true }} onSave={() => {}} onClose={() => {}} />,
   ['Inicio sin medir']);
+
+const night = { start: demo.start, end: demo.end };
+const withContext: SleepSession = {
+  ...demo,
+  context: buildContext({
+    ...night,
+    now: demo.end + 3_600_000,
+    sensorsOn: [],
+    events: [
+      { at: demo.start - 3_600_000, kind: 'batt', v: 80 },
+      { at: demo.start - 3_600_000, kind: 'net', v: 1 },
+      { at: demo.start + 3_600_000, kind: 'unlock' },
+    ],
+    device: buildDevice({ start: demo.start, appVersion: '1.0.0', snapshot: { device: { model: 'Pixel 8', sdk: 34, release: '14' } } }),
+  }),
+};
+check('Hoja de sesión con contexto del dispositivo',
+  <SessionSheet session={withContext} onSave={() => {}} onClose={() => {}} />,
+  ['Contexto del dispositivo', '<details', 'Pixel 8', 'Batería y carga', 'Wi-Fi', 'sin ubicación']);
+check('Hoja de sesión sin contexto: no muestra la sección (sesiones anteriores a la función)',
+  <SessionSheet session={demo} onSave={() => {}} onClose={() => {}} />, ['Confirma esta noche']);
+{
+  const html = renderToStaticMarkup(<SessionSheet session={demo} onSave={() => {}} onClose={() => {}} />);
+  if (html.includes('Contexto del dispositivo')) {
+    failures++;
+    console.log('  FAIL la hoja sin contexto no debería mostrar la sección');
+  }
+}
+const inferredSession: SleepSession = { ...demo, confidence: 'low', inferred: true };
+const habitAt = new Date('2026-08-18T23:40:00').getTime();
+check('Hoja de sesión dudosa con la hora habitual: ofrece el botón, sin aplicarla',
+  <SessionSheet session={inferredSession} habitualStart={habitAt} onSave={() => {}} onClose={() => {}} />,
+  ['¿Desde las 23:40, como sueles?', 'Inicio sin medir']);
+{
+  const html = renderToStaticMarkup(
+    <SessionSheet session={inferredSession} habitualStart={null} onSave={() => {}} onClose={() => {}} />,
+  );
+  if (html.includes('como sueles')) {
+    failures++;
+    console.log('  FAIL sin hábito aprendido no debe ofrecerse la hora habitual');
+  }
+}
 
 console.log(failures === 0 ? '\nRENDER OK\n' : `\n${failures} FALLOS DE RENDER\n`);
 process.exit(failures === 0 ? 0 : 1);

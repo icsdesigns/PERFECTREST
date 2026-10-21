@@ -344,6 +344,102 @@ de sueño acumulada y racha de noches cumplidas.
 Una sesión pertenece al día en que uno **se despierta**: dormir de lunes 23:40 a
 martes 07:10 es «la noche del martes».
 
+### Contexto del dispositivo de cada noche
+
+Para perfeccionar la detección hace falta saber qué hacía el móvil cuando se
+acertó o se falló una noche. Cada sesión (detectada o manual) puede llevar un
+campo opcional `context` ([`SessionContext`](src/lib/types.ts)): un resumen
+**agregado** del tramo de media hora antes de dormirte a media hora después de
+despertar, más el estado al inicio y al final. Lo calcula
+[`src/lib/sessionContext.ts`](src/lib/sessionContext.ts), que es código puro
+sobre el registro bruto del servicio; la parte asíncrona (leer el plugin) está
+en [`contextCollector.ts`](src/lib/contextCollector.ts).
+
+**Qué se guarda** (todo son recuentos, mínimos, máximos, porcentajes del tramo o
+valores al inicio y al final):
+
+| Sección | Contenido |
+| --- | --- |
+| Aparato | Modelo y fabricante, `SDK_INT` y versión de Android, versión de la app, idioma, zona horaria y desfase UTC al dormirte, qué sensores trae el móvil, exención de batería / alarmas exactas / notificaciones |
+| Pantalla | Encendidos, desbloqueos, encendidos sin desbloquear (notificaciones), micro-despertares de la noche, duración de cada uso (hasta 20), uso total y máximo, si estaba encendida al dormirte y al despertar |
+| Batería y carga | Enchufes y desenchufes, % del tramo enchufado, tipo de carga (pared, USB, inalámbrica, base), nivel de batería (inicio, fin, mín., máx.), temperatura mín. y máx. |
+| Sistema | % del tramo en Doze, en ahorro de energía y en modo avión; filtro de «no molestar» (inicio y fin); modo del timbre (silencio, vibrar, normal); tipo de red y % sin conexión; nº de dispositivos Bluetooth **de audio** conectados; brillo; orientación |
+| Sensores | Los que tengas activos para detectar: pasos y movimiento, luz (% oscuro/tenue/claro y lux mín./máx.), proximidad, postura. Siempre que haya datos: audio sonando y alarma (hora, si sonó, se canceló o no hubo actividad) |
+| Cómo se detectó | Disparadores, confianza y puntuación, `inferred`, hueco medido, cuánto movió el refinado el inicio y el final, latencia usada y de dónde salió, hábito aprendido en ese momento, evidencia de los sensores y motivo de descarte de los otros huecos de la noche |
+| Servicio | Reinicios por el sistema y errores durante el tramo |
+| Línea de tiempo | Hasta 40 eventos destacados (desbloqueos, enchufes, modo avión, cambios de timbre…) con su minuto respecto al inicio |
+
+**Qué no se guarda, nunca:** ubicación, nombre de la red Wi-Fi (SSID) ni de
+ninguna red, nombres ni direcciones de dispositivos Bluetooth, contenido de
+notificaciones, nombres de apps, contactos ni identificadores (IMEI, número de
+serie, ID de Android, cuenta). De la red sólo se anota el *tipo* y si hay
+conexión; de Bluetooth, *cuántos* dispositivos de audio hay conectados, contados
+con el gestor de audio. Todo se calcula y se queda en el móvil; sólo sale si tú
+lo exportas. No usa micrófono ni cámara.
+
+**Cómo se recoge, sin gastar batería.** El servicio no añade temporizadores,
+escuchas ni wakelocks. [`ContextSampler`](android/app/src/main/java/com/perfectrest/app/ContextSampler.java)
+lee el estado del sistema sólo en momentos en que ya está despierto (cada rearme
+del vigilante, al apagar o encender la pantalla, al enchufar o desenchufar) y
+como mucho una vez cada 3 minutos; la batería sale de la difusión pegajosa, sin
+registrar receptores. Anota en el registro bruto **sólo lo que cambia**, más una
+lectura de refresco cada 6 horas para poder reconstruir el valor de una noche
+aunque el registro haya rotado. Además escucha cuatro difusiones raras y
+protegidas (modo avión, timbre, ahorro de energía y cargador) para anotarlas a
+su hora. Cada lectura va en su propio `try/catch`: un parámetro que falta o un
+permiso que no está sólo deja ese dato sin anotar, y el resumen lo omite. El
+registro bruto sube de 2000 a 3000 eventos y ahora funde entradas del mismo
+tipo aunque haya otras intercaladas.
+
+**Permisos.** Sólo uno nuevo y *normal* (sin diálogo): `ACCESS_NETWORK_STATE`,
+para saber si hay conexión y de qué tipo. No se pide ubicación, ni
+`BLUETOOTH_CONNECT` (peligroso desde Android 12): los auriculares conectados se
+cuentan con `AudioManager.getDevices`, que no lo necesita.
+
+**Tamaño y limpieza.** Un contexto normal ocupa alrededor de 1,5 KB (120 noches, unos 180 KB); se descarta al cargar
+cualquiera de más de 8 KB o con otra forma. Se conservan los contextos de las
+**120 noches más recientes** y de menos de un año
+([`pruneContexts`](src/lib/sessionContext.ts)); las sesiones en sí no se tocan.
+Las sesiones anteriores a la función siguen igual, sin `context`. El estado ya
+no se reescribe en cada latido de la app, que cambiaba cada pocos segundos y
+habría reescrito todo el historial.
+
+**Cuándo.** La traza del algoritmo se guarda al proponer la noche. El resto se
+recoge en un efecto del store con el registro bruto, también para las noches
+manuales y las guardadas solas; se vuelve a calcular media hora después de
+despertar (cuando el tramo ya está completo) y si corriges el inicio o el final,
+mientras el registro bruto aún alcance (unos 3 días). Una noche cuyo registro ya
+no cubre el tramo queda marcada como `partial`.
+
+**Verlo, exportarlo y controlarlo.**
+
+- En la hoja de sesión, la sección plegable **«Contexto del dispositivo»** lo
+  cuenta en español.
+- La exportación CSV añade `inferida`, `inicio_habitual` y ~60 columnas
+  aplanadas (`pantalla_*`, `bateria_*`, `red_*`, `algo_*`…) al final, para no
+  mover las de siempre; la cabecera es la misma aunque una noche no tenga
+  contexto. El JSON lleva el contexto anidado tal como se guarda. La exportación
+  del registro bruto sigue igual (con los eventos nuevos).
+- En Ajustes, el interruptor **«Guardar contexto del dispositivo con cada
+  noche»** (activado por defecto, con el texto de privacidad). Apagado, la app no
+  guarda ningún contexto y el servicio deja de muestrear y de escuchar esas
+  difusiones. **«Borrar contextos guardados»** los quita todos y no se vuelven a
+  calcular; reactivar el ajuste sólo recoge las noches que acaben a partir de
+  ese momento. **«Borrar registro bruto»** vacía además los eventos que el
+  servicio guarda en el móvil.
+
+### La hora habitual, a petición
+
+Una propuesta con el inicio sin medir (`inferred`) y un hábito aprendido de tus
+noches muestra el botón **«¿Desde las 23:40, como sueles?»**, en el aviso y en
+la hoja de sesión. Sólo con tocarlo se pone esa hora como inicio —la ocurrencia
+más cercana al inicio propuesto que deja entre 3 y 13 horas de sueño—; nunca se
+aplica sola, y no aparece si el hábito sale del horario (`n = 0`) ni si no
+cambia el inicio en más de 10 minutos. Tocarlo revisa la sesión: pasa a
+*editada*, deja de ser inferida y sigue sin confirmar y editable (cambiar la
+hora a mano deshace la marca `habitStart`). Esa hora **no enseña el hábito**:
+aprender de una hora que salió del propio hábito lo reforzaría a sí mismo.
+
 ---
 
 ## Comprobaciones
@@ -361,7 +457,12 @@ martes 07:10 es «la noche del martes».
   lectura de los comentarios con la hora real, el hábito y la latencia
   aprendidos, la noche principal por día, los micro-despertares, la confianza
   combinada, los sensores —con la postura del móvil—, el inicio dudoso sin
-  evidencia de quietud y el corte por uso sostenido.
+  evidencia de quietud y el corte por uso sostenido. También el contexto del
+  dispositivo: el resumen de una noche sintética (pantalla, carga, red, alarma,
+  sensores), que 3000 eventos no pasen de 8 KB, que no haya campos de ubicación,
+  SSID ni identificadores, la migración y la poda a 120 noches, el CSV y el JSON
+  con contexto, la traza del algoritmo, que los eventos nuevos no muevan la
+  evidencia de la detección y la hora habitual a petición.
 - **Banco de pruebas** ([`scripts/backtest.ts`](scripts/backtest.ts)) — carga un
   historial real con comentarios («me acosté a las 00:30», «correcto», «no he
   dormido»), reconstruye el hueco bruto de cada sesión y lo hace pasar de nuevo
@@ -380,7 +481,14 @@ martes 07:10 es «la noche del martes».
   inicio por confianza (con el hábito aprendido: alta 0 min, media 45, baja 65),
   que es lo que dice si la etiqueta de la propuesta es honesta.
 - **Render** ([`scripts/rendercheck.tsx`](scripts/rendercheck.tsx)) — cada
-  pantalla se renderiza fuera del navegador para detectar errores de render.
+  pantalla se renderiza fuera del navegador para detectar errores de render,
+  con la sección plegable del contexto, el botón de la hora habitual y el
+  interruptor de privacidad de Ajustes.
+
+El contexto del dispositivo no cambió las reglas de huecos del servicio (sólo
+añadió muestreo), así que el modelo de `nightsim.ts` sigue siendo fiel, y el
+banco de pruebas da las mismas cifras: error de inicio medio 32 min en línea, 0
+falsos positivos, 0 noches perdidas.
 
 La suite de noches existe porque las otras entraban por la mitad de la tubería:
 le daban a `evaluateGap` un hueco limpio de 23:30 a 07:00 que se inventaba la
@@ -404,7 +512,11 @@ La lógica pura del servicio que tiene reglas propias en Java —la clasificaci�
 de la postura a partir de una ráfaga del acelerómetro y cuándo se reanuda un
 hueco— se prueba con JUnit
 ([`PostureTest.java`](android/app/src/test/java/com/perfectrest/app/PostureTest.java),
-`gradlew testDebugUnitTest`); sin Gradle se puede compilar con `javac` contra el
+`gradlew testDebugUnitTest`) y el muestreo del contexto —cuándo se anota un valor,
+códigos de carga y red, cuenta de auriculares Bluetooth y fusión de eventos del
+registro bruto— en
+[`ContextSamplerTest.java`](android/app/src/test/java/com/perfectrest/app/ContextSamplerTest.java);
+sin Gradle se puede compilar con `javac` contra el
 `android-all` de Robolectric (Maven Central, API 34) y stubs mínimos de
 Capacitor y AndroidX, y ejecutar con `JUnitCore`.
 
@@ -682,6 +794,8 @@ src/
     noteTimes.ts         Módulo 3: hora real que cuenta el comentario de una noche
     rawEvents.ts         Módulo 3: registro bruto y evidencias de los sensores
     sensors.ts           Módulo 3: catálogo de sensores opcionales
+    sessionContext.ts    Módulo 3: contexto del dispositivo de cada noche (puro)
+    contextCollector.ts  Módulo 3: recogida del contexto desde el plugin
     updater.ts           Autoactualización: API de GitHub y versiones
     triggers.ts          Módulo 3: catálogo de disparadores
     triggerLog.ts        Módulo 3: registro de señales, huecos y descartes

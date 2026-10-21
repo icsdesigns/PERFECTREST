@@ -151,6 +151,12 @@ final class SensorWatcher {
     private boolean audioWasActive = false;
     private long lastAudioLoggedAt = 0L;
     private long lastAlarmAt = -1L;
+    /**
+     * Con el contexto del dispositivo activo también se anotan la próxima alarma
+     * y el audio sonando aunque no sean sensores de detección (son consultas, no
+     * escuchas), y los lux de la luz.
+     */
+    private boolean contextExtras = false;
 
     SensorWatcher(Context context) {
         this.context = context.getApplicationContext();
@@ -180,6 +186,11 @@ final class SensorWatcher {
             stop(STEPS);
             if (!start(STEPS)) active.remove(STEPS);
         }
+    }
+
+    /** Activa o apaga las consultas extra del contexto del dispositivo (ver {@link #contextExtras}). */
+    void setContextExtras(boolean on) {
+        contextExtras = on;
     }
 
     void stopAll() {
@@ -353,8 +364,13 @@ final class SensorWatcher {
         // Sólo cuentan los cambios de nivel: el sensor repite lecturas.
         if (level == lastLightLevel) return;
         lastLightLevel = level;
-        RawEventLog.addMerged(context, eventTimeMs(event.timestamp), "light", level,
-            LIGHT_MERGE_MS, true);
+        long at = eventTimeMs(event.timestamp);
+        RawEventLog.addMerged(context, at, "light", level, LIGHT_MERGE_MS, true);
+        // Los lux del cambio de nivel, para el contexto de la noche: el nivel
+        // dice si se apagó la luz y esto, cuánta había.
+        if (contextExtras) {
+            RawEventLog.addMerged(context, at, "lux", Math.round(lux), LIGHT_MERGE_MS, true);
+        }
     }
 
     // --- Proximidad ---
@@ -408,7 +424,7 @@ final class SensorWatcher {
     void sample(boolean screenJustOff) {
         long now = System.currentTimeMillis();
 
-        if (active.contains(ALARM)) {
+        if (active.contains(ALARM) || contextExtras) {
             AlarmManager alarms = (AlarmManager) context.getSystemService(Context.ALARM_SERVICE);
             if (alarms != null) {
                 AlarmManager.AlarmClockInfo next = alarms.getNextAlarmClock();
@@ -420,7 +436,7 @@ final class SensorWatcher {
             }
         }
 
-        if (active.contains(AUDIO)) {
+        if (active.contains(AUDIO) || contextExtras) {
             AudioManager audio = (AudioManager) context.getSystemService(Context.AUDIO_SERVICE);
             boolean playing = audio != null && audio.isMusicActive();
             if (playing) {

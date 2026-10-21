@@ -14,6 +14,7 @@ import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.content.pm.ServiceInfo;
+import android.media.AudioManager;
 import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
@@ -274,6 +275,8 @@ public class SleepMonitorService extends Service {
     private boolean foregrounded = false;
 
     private BroadcastReceiver receiver;
+    /** Cambios raros del sistema (modo avión, timbre, ahorro de energía, cargador) para el contexto de la noche. */
+    private BroadcastReceiver contextReceiver;
     private SensorWatcher sensorWatcher;
 
     @Override
@@ -283,8 +286,10 @@ public class SleepMonitorService extends Service {
         createSummaryChannel();
         startInForeground();
         registerDeviceReceiver();
+        registerContextReceiver();
         applySensors();
         primeScreenState();
+        ContextSampler.sample(this, true);
         scheduleWatchdog(this);
     }
 
@@ -297,6 +302,7 @@ public class SleepMonitorService extends Service {
         // Los ajustes pueden haber cambiado entre dos arranques (el usuario
         // activa o desactiva un disparador), así que se vuelve a registrar.
         registerDeviceReceiver();
+        registerContextReceiver();
         applySensors();
         // Cada rearme es también una oportunidad de darse cuenta de que la
         // señal de vuelta se perdió y el hueco lleva horas sin poder cerrarse.
@@ -305,6 +311,8 @@ public class SleepMonitorService extends Service {
         // es un momento barato para preguntar por la alarma y el audio, y para
         // una lectura de postura, sin ningún temporizador propio.
         if (sensorWatcher != null) sensorWatcher.sample();
+        // Y de anotar el resto de parámetros del sistema que cambiaron desde la última vez.
+        ContextSampler.sample(this, true);
         scheduleWatchdog(this);
         // START_STICKY: si el sistema mata el servicio por memoria, lo recrea.
         return START_STICKY;
@@ -326,6 +334,7 @@ public class SleepMonitorService extends Service {
     @Override
     public void onDestroy() {
         unregisterDeviceReceiver();
+        unregisterContextReceiver();
         stopWatchingForUnlock();
         wakeWatch.removeCallbacksAndMessages(null);
         if (sensorWatcher != null) sensorWatcher.stopAll();
@@ -379,6 +388,7 @@ public class SleepMonitorService extends Service {
 
     private void applySensors() {
         if (sensorWatcher == null) sensorWatcher = new SensorWatcher(this);
+        sensorWatcher.setContextExtras(ContextSampler.enabled(this));
         sensorWatcher.apply(wantedSensors());
     }
 
@@ -614,6 +624,47 @@ public class SleepMonitorService extends Service {
         logEvent(this, null, "service", "escuchando: " + prefs().getString(KEY_TRIGGERS, TRIGGER_SCREEN));
     }
 
+    private void unregisterContextReceiver() {
+        if (contextReceiver == null) return;
+        try {
+            unregisterReceiver(contextReceiver);
+        } catch (IllegalArgumentException ignored) {
+            // Ya estaba dado de baja.
+        }
+        contextReceiver = null;
+    }
+
+    /**
+     * Receptor del contexto del dispositivo. Son difusiones raras (el usuario
+     * activa el modo avión, cambia el timbre o el ahorro de energía, enchufa el
+     * cargador) y todas protegidas: sólo las emite el sistema. Escucharlas no
+     * cuesta nada y permite anotar el cambio a su hora en vez de a la del
+     * siguiente rearme. No se registra nada si el usuario apagó el ajuste.
+     */
+    private void registerContextReceiver() {
+        unregisterContextReceiver();
+        if (!ContextSampler.enabled(this)) return;
+
+        IntentFilter filter = new IntentFilter();
+        filter.addAction(Intent.ACTION_AIRPLANE_MODE_CHANGED);
+        filter.addAction(AudioManager.RINGER_MODE_CHANGED_ACTION);
+        filter.addAction(PowerManager.ACTION_POWER_SAVE_MODE_CHANGED);
+        filter.addAction(Intent.ACTION_POWER_CONNECTED);
+        filter.addAction(Intent.ACTION_POWER_DISCONNECTED);
+
+        contextReceiver = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context context, Intent intent) {
+                ContextSampler.sample(context, true);
+            }
+        };
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(contextReceiver, filter, Context.RECEIVER_EXPORTED);
+        } else {
+            registerReceiver(contextReceiver, filter);
+        }
+    }
+
     private void handleEvent(String action, long now) {
         if (action == null) return;
 
@@ -630,6 +681,7 @@ public class SleepMonitorService extends Service {
                 screenWentOff(now);
                 openGap(TRIGGER_SCREEN, now, true);
                 if (sensorWatcher != null) sensorWatcher.sample(true);
+                ContextSampler.sample(this, false);
                 break;
 
             case Intent.ACTION_USER_PRESENT:
@@ -647,6 +699,7 @@ public class SleepMonitorService extends Service {
                 // cerrojo unos minutos en vez de esperar a USER_PRESENT.
                 if (!keyguardLocked()) userIsBack(now);
                 else watchForUnlock();
+                ContextSampler.sample(this, false);
                 break;
 
             case Intent.ACTION_POWER_CONNECTED:

@@ -102,6 +102,9 @@ public class SleepMonitorPlugin extends Plugin {
             .putInt(SleepMonitorService.KEY_MIN_GAP, minGap)
             .putString(SleepMonitorService.KEY_TRIGGERS, triggers)
             .putString(SleepMonitorService.KEY_SENSORS, sensors)
+            // Guardar el contexto del dispositivo con cada noche (ajuste de la
+            // app): si está apagado, el servicio no muestrea nada de eso.
+            .putBoolean(ContextSampler.KEY_CONTEXT, call.getBoolean("deviceContext", true))
             // El aviso del despertar lo dispara el servicio, no la web: para
             // eso tiene que conocer el ajuste y la ventana nocturna.
             .putBoolean(SleepMonitorService.KEY_SUMMARY, call.getBoolean("wakeSummary", false))
@@ -323,6 +326,34 @@ public class SleepMonitorPlugin extends Plugin {
     public void getRawEvents(PluginCall call) {
         JSObject ret = new JSObject();
         ret.put("events", RawEventLog.read(getContext()));
+        call.resolve(ret);
+    }
+
+    /**
+     * Instantánea del dispositivo para el contexto de la noche: datos estáticos
+     * (modelo, versión de Android, versión de la app, idioma, zona horaria),
+     * estado de ahora mismo y qué sensores trae el móvil. Antes de responder
+     * fuerza un muestreo, para que el registro bruto tenga el estado actual al
+     * resumir una noche que acaba de terminar. Sin identificadores personales.
+     * Si algo no se puede leer, se omite ese campo en vez de fallar.
+     */
+    @PluginMethod
+    public void getDeviceSnapshot(PluginCall call) {
+        JSObject ret = new JSObject();
+        try {
+            ContextSampler.sample(getContext(), true);
+            JSONObject snapshot = ContextSampler.snapshot(getContext());
+            ret.put("device", snapshot.getJSONObject("device"));
+            ret.put("state", snapshot.getJSONObject("state"));
+            try {
+                ret.put("sensors", SensorWatcher.describe(getContext()));
+            } catch (JSONException ignored) {
+                // Sin catálogo de sensores: el resto de la instantánea sigue valiendo.
+            }
+        } catch (JSONException e) {
+            call.reject("No se pudo leer el estado del dispositivo");
+            return;
+        }
         call.resolve(ret);
     }
 

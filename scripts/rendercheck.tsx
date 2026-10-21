@@ -4,7 +4,7 @@
  * datos que no existen todavía) sin necesidad de abrir la app a mano.
  */
 import { renderToStaticMarkup } from 'react-dom/server';
-import { StoreProvider } from '../src/state/store';
+import { StoreProvider, initialState, reducer } from '../src/state/store';
 import { UpdateProvider } from '../src/state/update';
 import App from '../src/App';
 import { HomeScreen } from '../src/screens/HomeScreen';
@@ -14,7 +14,7 @@ import { StatsScreen } from '../src/screens/StatsScreen';
 import { SettingsScreen } from '../src/screens/SettingsScreen';
 import { SessionSheet } from '../src/components/SessionSheet';
 import { buildContext, buildDevice } from '../src/lib/sessionContext';
-import type { SleepSession } from '../src/lib/types';
+import type { AppState, SleepSession } from '../src/lib/types';
 
 let failures = 0;
 
@@ -127,6 +127,34 @@ check('Hoja de sesión dudosa con la hora habitual: ofrece el botón, sin aplica
     failures++;
     console.log('  FAIL sin hábito aprendido no debe ofrecerse la hora habitual');
   }
+}
+
+console.log('\n--- Estado: contextos que llegan tarde ---');
+{
+  const ok = (name: string, cond: boolean) => {
+    if (cond) console.log(`  ok   ${name}`);
+    else {
+      failures++;
+      console.log(`  FAIL ${name}`);
+    }
+  };
+  const night: SleepSession = { ...demo, id: 'n1', context: undefined };
+  const ctx = buildContext({ start: night.start, end: night.end, now: night.end + 3_600_000, sensorsOn: [], events: [] });
+  const base: AppState = { ...initialState, onboarded: true, sessions: [night] };
+  const on = reducer(base, { type: 'setContexts', contexts: { n1: ctx } });
+  ok('con el ajuste activo, el contexto recogido se guarda', on.sessions[0].context === ctx);
+  const off = reducer({ ...base, monitor: { ...base.monitor, saveContext: false } }, { type: 'setContexts', contexts: { n1: ctx } });
+  ok('si se apagó el ajuste mientras se recogía, no se guarda', off.sessions[0].context === undefined);
+  const cleared = reducer(base, { type: 'clearContexts', at: night.end + 60_000 });
+  const late = reducer(cleared, { type: 'setContexts', contexts: { n1: ctx } });
+  ok('si se borraron los contextos mientras se recogía, no vuelve', late.sessions[0].context === undefined);
+  const moved = reducer(base, { type: 'setContexts', contexts: { n1: { ...ctx, span: { start: night.start - 60_000, end: night.end } } } });
+  ok('un contexto de otro tramo (sesión corregida entre medias) no se pega', moved.sessions[0].context === undefined);
+  const pend: AppState = { ...base, pendingSessions: [{ ...night, id: 'p1', inferred: true, confirmed: false }] };
+  const habit = reducer(pend, { type: 'applyHabitStart', id: 'p1', start: night.start - 3_600_000 });
+  const p = habit.pendingSessions[0];
+  ok('la hora habitual sólo se aplica a la propuesta tocada, sin confirmarla',
+    p.start === night.start - 3_600_000 && p.habitStart === true && !p.inferred && !p.confirmed && habit.sessions.length === 1);
 }
 
 console.log(failures === 0 ? '\nRENDER OK\n' : `\n${failures} FALLOS DE RENDER\n`);

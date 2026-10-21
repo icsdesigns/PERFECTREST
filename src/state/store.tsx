@@ -110,7 +110,8 @@ function appendNote(session: SleepSession, note: string): SleepSession {
   return { ...session, note: `${session.note}\n${note}` };
 }
 
-function reducer(state: AppState, action: Action): AppState {
+/** Exportado sólo para las pruebas sin navegador (`scripts/rendercheck.tsx`). */
+export function reducer(state: AppState, action: Action): AppState {
   switch (action.type) {
     case 'hydrate':
       return action.state;
@@ -185,10 +186,16 @@ function reducer(state: AppState, action: Action): AppState {
       };
 
     case 'setContexts': {
+      // La recogida es asíncrona: si mientras tanto se apagó el ajuste o se
+      // borraron los contextos, lo que llega ya no se guarda.
+      const { saveContext, contextSince } = state.monitor;
+      if (!saveContext) return state;
       // Si entre medias se corrigió la sesión, el contexto es de otro tramo: se espera al siguiente pase.
       const apply = (s: SleepSession): SleepSession => {
         const c = action.contexts[s.id];
-        return c && c.span?.start === s.start && c.span?.end === s.end ? { ...s, context: c } : s;
+        return c && s.end > contextSince && c.span?.start === s.start && c.span?.end === s.end
+          ? { ...s, context: c }
+          : s;
       };
       return {
         ...state,
@@ -511,8 +518,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         dispatch({ type: 'setContexts', contexts });
       })
       .catch(() => {
-        // Sin contexto no se pierde nada: la sesión vale igual y se reintenta
-        // cuando cambie el estado.
+        // Sin contexto no se pierde nada: la sesión vale igual. Se olvida el
+        // intento para reintentarlo en el siguiente cambio de estado.
+        batch.forEach((s) => triedContext.current.delete(key(s)));
         collectingContext.current = false;
       });
   }, [ready, state]);

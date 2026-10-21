@@ -60,6 +60,8 @@ export const initialState: AppState = {
     wakeSummary: true,
     triggers: DEFAULT_TRIGGERS,
     sensors: DEFAULT_SENSORS,
+    saveContext: true,
+    contextSince: 0,
   },
   sessions: [],
   theme: 'dark',

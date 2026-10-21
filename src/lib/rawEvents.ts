@@ -41,7 +41,56 @@ export type RawKind =
    * Postura del móvil en una lectura puntual con la pantalla apagada (v: ver
    * `POSTURE_*`). Una línea por lectura, cada pocos minutos.
    */
-  | 'posture';
+  | 'posture'
+  // --- Contexto del dispositivo ---------------------------------------------
+  // Los escribe el muestreo ligero del servicio (`ContextSampler.java`) sólo
+  // cuando cambia el valor, más una lectura de refresco cada pocas horas, y los
+  // resume `sessionContext.ts` para cada noche. No los lee la detección.
+  /** Nivel de batería, en % (0-100). */
+  | 'batt'
+  /** Temperatura de la batería, en décimas de °C. */
+  | 'batt-temp'
+  /** Tipo de carga (`CHARGE_*`). */
+  | 'chg-type'
+  /** Red activa (`NET_*`). */
+  | 'net'
+  /** Modo avión (v: 1 activo, 0 no). */
+  | 'airplane'
+  /** Modo del timbre (`RINGER_*`). */
+  | 'ringer'
+  /** Modo de ahorro de energía (v: 1 activo, 0 no). */
+  | 'powersave'
+  /** Reposo profundo muestreado (v: 1 en Doze, 0 no). */
+  | 'doze'
+  /** Filtro de interrupciones (`DND_*`: 1 todo, 2 prioritarias, 3 silencio total, 4 sólo alarmas). */
+  | 'dnd-mode'
+  /** Dispositivos Bluetooth de audio conectados (v = cuántos). */
+  | 'bt'
+  /** Brillo de la pantalla, en % (0-100). */
+  | 'bright'
+  /** Orientación de la pantalla (v: 1 vertical, 2 horizontal). */
+  | 'orient'
+  /** Lux medidos en el último cambio de nivel de luz. */
+  | 'lux';
+
+/** Tipos de carga de `chg-type`. */
+export const CHARGE_NONE = 0;
+export const CHARGE_AC = 1;
+export const CHARGE_USB = 2;
+export const CHARGE_WIRELESS = 3;
+export const CHARGE_DOCK = 4;
+
+/** Redes de `net`. */
+export const NET_NONE = 0;
+export const NET_WIFI = 1;
+export const NET_CELLULAR = 2;
+export const NET_ETHERNET = 3;
+export const NET_OTHER = 4;
+
+/** Modos del timbre de `ringer`. */
+export const RINGER_SILENT = 0;
+export const RINGER_VIBRATE = 1;
+export const RINGER_NORMAL = 2;
 
 export interface RawEvent {
   at: number;

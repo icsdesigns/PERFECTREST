@@ -81,7 +81,9 @@ export type SensorId =
   /** Próxima alarma del reloj: cuándo se espera despertar. */
   | 'alarm'
   /** Audio sonando con la pantalla apagada: aún no se ha dormido. */
-  | 'audio';
+  | 'audio'
+  /** Postura del móvil (gravedad): plano y quieto sobre una superficie, o en bolsillo/mano. */
+  | 'posture';
 
 export interface MonitorSettings {
   enabled: boolean;
@@ -110,6 +112,18 @@ export interface MonitorSettings {
   triggers: Record<TriggerId, boolean>;
   /** Qué sensores opcionales están activos. Catálogo en `lib/sensors.ts`. */
   sensors: Record<SensorId, boolean>;
+  /**
+   * Guardar con cada noche un resumen del estado del dispositivo (pantalla,
+   * batería, red, sensores…) para analizarla después. Todo es local y agregado:
+   * ver `SessionContext`. Activado por defecto.
+   */
+  saveContext: boolean;
+  /**
+   * Sólo se recoge contexto de las noches que acaban después de este instante.
+   * Se actualiza al borrar los contextos guardados o al reactivar el ajuste,
+   * para que lo borrado no vuelva a calcularse con el registro bruto.
+   */
+  contextSince: number;
 }
 
 /**
@@ -175,9 +189,187 @@ export interface SleepSession {
   detectedEnd?: number;
   /** Siesta aceptada por tener indicios propios; el resto de huecos de un día no se proponen. */
   nap?: boolean;
+  /**
+   * El inicio no está respaldado por una medida: se dedujo de tu hábito o del
+   * horario, o es el último uso del móvil muy por delante de tu hora de
+   * acostarte sin que ningún sensor confirme la quietud. Va siempre con
+   * confianza baja, no se guarda sola con «guardar sin preguntar» y cede ante
+   * cualquier otra propuesta de la misma noche.
+   */
+  inferred?: boolean;
+  /**
+   * El inicio es la hora habitual que el usuario aplicó con un toque («¿desde
+   * las 23:40, como sueles?»), no una medida ni una hora que escribiera. Cuenta
+   * como revisada por él, pero no enseña el hábito: aprender de una hora que
+   * salió del propio hábito lo reforzaría a sí mismo.
+   */
+  habitStart?: boolean;
   /** Valoración subjetiva del descanso, 1-5. */
   quality?: number;
   note?: string;
+  /**
+   * Contexto del dispositivo durante la noche, para analizarla después. Todo
+   * agregado y local: ver `lib/sessionContext.ts`. Opcional, y ausente en las
+   * sesiones anteriores a la función o si el usuario la apagó.
+   */
+  context?: SessionContext;
+}
+
+/**
+ * Resumen de un parámetro que cambia con el tiempo (nivel de batería, tipo de
+ * red, modo del timbre…) en el tramo analizado. Los valores son los códigos del
+ * registro bruto; `lib/sessionContext.ts` los traduce al mostrarlos.
+ */
+export interface StateSummary {
+  /** Valor al inicio de la sesión (null si no se conoce). */
+  start: number | null;
+  /** Valor al final de la sesión (null si no se conoce). */
+  end: number | null;
+  min?: number;
+  max?: number;
+  /** Cuántas veces cambió dentro del tramo. */
+  changes: number;
+  /** Porcentaje del tramo (0-100) con cada valor, sólo para los discretos. */
+  pct?: Record<string, number>;
+}
+
+/** Datos estáticos del móvil y de la app. Ni identificadores ni nombres. */
+export interface ContextDevice {
+  model?: string;
+  manufacturer?: string;
+  /** Build.VERSION.SDK_INT. */
+  sdk?: number;
+  /** Versión de Android legible («14»). */
+  release?: string;
+  app: string;
+  /** Idioma del sistema, p. ej. «es-ES». */
+  locale?: string;
+  tz?: string;
+  /** Desfase respecto a UTC al inicio de la sesión, en minutos. */
+  tzOffsetMin: number;
+  /** Qué sensores tiene el móvil (no si están activos). */
+  hasSensors?: Record<string, boolean>;
+  /** Exención de batería / alarmas exactas / notificaciones, que condicionan la fiabilidad. */
+  batteryExempt?: boolean;
+  exactAlarms?: boolean;
+  notifications?: boolean;
+}
+
+/** Cómo llegó el algoritmo a proponer la noche: disparadores, confianza y razones. */
+export interface ContextAlgo {
+  triggers: TriggerId[];
+  confidence: Confidence;
+  inferred: boolean;
+  nap?: boolean;
+  /** Puntuación 0-1 de lo noche que parecía el hueco. */
+  score?: number;
+  /** Duración del hueco medido, en minutos. */
+  gapMin?: number;
+  /** Cuánto movió `refineEdges` el inicio y el final respecto a lo medido (min). */
+  startShiftMin?: number;
+  endShiftMin?: number;
+  /** Latencia que se sumó al inicio y de dónde salió. */
+  latencyMin?: number;
+  latencySource?: 'learned' | 'settings';
+  /** Hábito aprendido en ese momento (minutos desde medianoche). */
+  habit?: { startMin: number; endMin: number; n: number; spreadMin?: number };
+  /** Sensores activos cuando se propuso. */
+  sensors?: SensorId[];
+  /** Lo que dijeron los sensores del hueco. */
+  evidence?: {
+    activityAt: number | null;
+    wakeAt: number | null;
+    dark: number | null;
+    moves: number | null;
+    flat: number | null;
+    alarmMatch: boolean | null;
+  };
+  /** Huecos de la misma noche que se descartaron y por qué. */
+  discards?: Array<{ reason: string; startMin: number; endMin: number }>;
+}
+
+/**
+ * Instantánea de la noche: lo que el móvil y sus sensores hicieron entre media
+ * hora antes de dormirse y media hora después de despertar. Son agregados
+ * (conteos, mínimos, máximos, porcentajes), nunca series ni nada identificable:
+ * sin ubicación, sin SSID ni nombres de dispositivos Bluetooth, sin contenido
+ * de notificaciones ni nombres de apps. Se calcula y se guarda en el móvil.
+ */
+export interface SessionContext {
+  /** Versión del formato, para poder cambiarlo sin romper lo guardado. */
+  v: number;
+  /** Cuándo se recogió la parte del dispositivo (epoch ms); ausente si sólo hay traza. */
+  collected?: number;
+  /** Tramo analizado (epoch ms) y el inicio y fin de la sesión que se usaron. */
+  from?: number;
+  to?: number;
+  span?: { start: number; end: number };
+  /** El registro bruto no cubría todo el tramo: faltan datos. */
+  partial?: boolean;
+  device?: ContextDevice;
+  algo?: ContextAlgo;
+  screen?: {
+    ons: number;
+    unlocks: number;
+    /** Encendidos sin desbloqueo: notificaciones o el gesto de levantar el móvil. */
+    glances: number;
+    /** Micro-despertares: desbloqueos entre el inicio y el final de la sesión. */
+    nightUnlocks: number;
+    nightOns: number;
+    /** Tiempo total de uso con la pantalla desbloqueada, en segundos. */
+    useSec: number;
+    /** Duración de cada uso, en segundos (los 20 primeros). */
+    usesSec: number[];
+    longestSec: number;
+    /** ¿Estaba la pantalla encendida al inicio / al final de la sesión? */
+    onAtStart: boolean | null;
+    onAtEnd: boolean | null;
+  };
+  power?: {
+    plugs: number;
+    unplugs: number;
+    /** Porcentaje del tramo enchufado. */
+    chargingPct: number | null;
+    /** 0 sin carga, 1 pared, 2 USB, 3 inalámbrica, 4 base. */
+    chargeType?: StateSummary;
+    battery?: StateSummary;
+    /** Temperatura de la batería, °C. */
+    tempC?: { min: number; max: number };
+  };
+  system?: {
+    doze?: StateSummary;
+    dnd?: StateSummary;
+    airplane?: StateSummary;
+    powerSave?: StateSummary;
+    ringer?: StateSummary;
+    net?: StateSummary;
+    /** Dispositivos Bluetooth de audio conectados. */
+    bt?: StateSummary;
+    bright?: StateSummary;
+    orient?: StateSummary;
+  };
+  sensors?: {
+    /** Sensores de detección que el usuario tenía activos. */
+    on: SensorId[];
+    steps?: { steps: number; motions: number };
+    light?: { pct: Record<string, number>; luxMin?: number; luxMax?: number; changes: number };
+    proximity?: { coveredPct: number | null; changes: number };
+    posture?: { readings: number; flatPct: number; carried: number; tilted: number };
+    audio?: { playingPct: number; starts: number };
+    alarm?: {
+      /** Alarma que cae cerca del final de la noche (epoch ms), si la hay. */
+      at: number | null;
+      /** Minutos entre el despertar y la alarma (negativo: sonó antes). */
+      deltaMin?: number;
+      status: 'rang' | 'cancelled' | 'no-screen' | 'pending' | 'none';
+      /** ¿Había alguna alarma programada al empezar la sesión? */
+      setAtStart: boolean | null;
+    };
+  };
+  /** Salud del servicio durante el tramo. */
+  service?: { restarts: number; errors: number };
+  /** Eventos destacados (minutos desde el inicio de la sesión, tipo, valor); como mucho 40. */
+  timeline?: Array<[number, string, number?]>;
 }
 
 export interface AppState {

@@ -69,6 +69,8 @@ const MON: MonitorSettings = {
   wakeSummary: true,
   triggers: { ...DEFAULT_TRIGGERS },
   sensors: { ...DEFAULT_SENSORS },
+  saveContext: true,
+  contextSince: 0,
 };
 const SCHEDULE: ScheduleSettings = { mode: 'uniform', goals: { ...DEFAULT_GOALS } };
 const LATENCY = 15;
@@ -134,15 +136,21 @@ function replay(mode: Mode): Outcome[] {
     const learnFrom =
       mode === 'online' ? history.slice(0, i) : history.filter((_, j) => j !== i);
     const habit = learnHabit(learnFrom, SCHEDULE, s.end);
-    const { results, rejected } = evaluateGaps([gap], MON, { habit, known: knownNights([], known) });
+    const learned = learnLatency(learnFrom);
+    const { results, rejected } = evaluateGaps([gap], MON, {
+      habit,
+      known: knownNights([], known),
+      latencyMinutes: learned ?? LATENCY,
+    });
     const mine = results[0];
     if (!mine) {
       outcomes.push({ session: null, reason: rejected[0]?.reason });
       return;
     }
     const refined = refineEdges(mine.session, LATENCY, {
-      learnedLatencyMinutes: learnLatency(learnFrom),
+      learnedLatencyMinutes: learned,
       habit,
+      evidence: mine.evidence,
     });
     known.push(refined);
     outcomes.push({ session: refined });
@@ -170,6 +178,14 @@ interface Metrics {
   missed: number;
   missedTotal: number;
   highConfidenceWrong: number;
+  /** Inicio de las propuestas que no van marcadas como dudosas (`inferred`). */
+  firmStartErrors: number[];
+  /** Propuestas marcadas como dudosas: inicio deducido o sin evidencia que lo respalde. */
+  doubtful: number;
+  /** Inicios equivocados por más de una hora que NO van marcados como dudosos. */
+  wrongButFirm: number;
+  /** Error del inicio según la confianza con que se propuso: dice si la etiqueta es honesta. */
+  byConfidence: Record<SleepSession['confidence'], number[]>;
 }
 
 function measure(sessions: Array<SleepSession | null>): Metrics {
@@ -183,6 +199,10 @@ function measure(sessions: Array<SleepSession | null>): Metrics {
     missed: 0,
     missedTotal: 0,
     highConfidenceWrong: 0,
+    firmStartErrors: [],
+    doubtful: 0,
+    wrongButFirm: 0,
+    byConfidence: { high: [], medium: [], low: [] },
   };
   history.forEach((orig, i) => {
     const t = truths[i];
@@ -202,7 +222,13 @@ function measure(sessions: Array<SleepSession | null>): Metrics {
       if (t.start !== null) {
         const err = min(s.start - t.start);
         m.startErrors.push(err);
+        m.byConfidence[s.confidence].push(err);
         if (s.confidence === 'high' && err > 60) m.highConfidenceWrong++;
+        if (s.inferred) m.doubtful++;
+        else {
+          m.firmStartErrors.push(err);
+          if (err > 60) m.wrongButFirm++;
+        }
       }
       if (t.end !== null) m.endErrors.push(min(s.end - t.end));
     } else if (!t.labeled && orig.end - orig.start < 4.5 * HOUR) {
@@ -222,6 +248,17 @@ function report(name: string, m: Metrics) {
       ` | falsos positivos ${m.falsePositives}/${m.falsePositivesTotal}` +
       ` | cortas sospechosas ${m.suspect}/${m.suspectTotal}` +
       ` | noches perdidas ${m.missed}/${m.missedTotal}`,
+  );
+  console.log(
+    `  ${''.padEnd(22)}` +
+      ` de ellas dudosas (inicio inferido): ${m.doubtful}/${m.startErrors.length}` +
+      ` | inicio de las no dudosas: error medio ${Math.round(mean(m.firmStartErrors))} min (${m.firmStartErrors.length})` +
+      ` | >60 min sin marcar como dudosas: ${m.wrongButFirm}`,
+  );
+  const conf = (c: SleepSession['confidence'], label: string) =>
+    `${label} ${Math.round(mean(m.byConfidence[c]))} min (${m.byConfidence[c].length})`;
+  console.log(
+    `  ${''.padEnd(22)} error del inicio por confianza: ${conf('high', 'alta')}, ${conf('medium', 'media')}, ${conf('low', 'baja')}`,
   );
 }
 
@@ -295,6 +332,21 @@ if (usingFixture) {
     'las sesiones cortas sospechosas se reducen al menos a un tercio',
     looM.suspect <= before.suspect / 3,
     [looM.suspect, before.suspect],
+  );
+  assert(
+    'con el hábito ya aprendido, ningún inicio equivocado por más de una hora se da por bueno: va marcado como dudoso',
+    looM.wrongButFirm === 0,
+    looM.wrongButFirm,
+  );
+  assert(
+    'las propuestas no dudosas tienen el inicio a menos de 20 min de media, también en línea',
+    mean(looM.firmStartErrors) < 20 && mean(online.firmStartErrors) < 20,
+    [Math.round(mean(looM.firmStartErrors)), Math.round(mean(online.firmStartErrors))],
+  );
+  assert(
+    'la confianza es honesta: las de confianza media se equivocan menos de una hora de media y las altas menos que las medias',
+    mean(looM.byConfidence.medium) < 60 && mean(looM.byConfidence.high) <= mean(looM.byConfidence.medium),
+    [Math.round(mean(looM.byConfidence.high)), Math.round(mean(looM.byConfidence.medium))],
   );
   assert(
     'ya no hay noches de confianza alta con un inicio 60 min equivocado',

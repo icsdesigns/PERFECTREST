@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react';
 import { Card, Empty, Metric, Pill, Segmented } from '../components/ui';
 import { DurationChart, ScheduleChart } from '../components/viz';
 import { SessionSheet } from '../components/SessionSheet';
+import { habitualStart, learnHabit } from '../lib/habit';
 import { buildNights, insight, summarize, usableSessions } from '../lib/stats';
 import {
   HOUR,
@@ -204,6 +205,11 @@ export function StatsScreen() {
       {editing && (
         <SessionSheet
           session={editing}
+          habitualStart={
+            editing.inferred && !editing.nap
+              ? habitualStart(editing, learnHabit(state.sessions, state.schedule))
+              : null
+          }
           onSave={saveSession}
           onDelete={state.sessions.some((s) => s.id === editing.id) ? deleteSession : undefined}
           onClose={() => setEditing(null)}

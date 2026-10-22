@@ -13,6 +13,7 @@ import { useAppUpdate } from './state/update';
 import { requestPermission } from './lib/notifications';
 import { requestBatteryExemption } from './lib/backgroundMonitor';
 import { formatClock, formatDuration, relativeDayLabel } from './lib/time';
+import { habitualStart, learnHabit } from './lib/habit';
 import { useStore } from './state/store';
 import './App.css';
 
@@ -81,6 +82,12 @@ export default function App() {
   // al resolverla aparece la siguiente.
   const pending = state.pendingSessions[0] ?? null;
   const head = TITLES[tab];
+  // «¿Desde las 23:40, como sueles?» sólo para propuestas de inicio dudoso y
+  // con un hábito aprendido; nunca se aplica sin que el usuario lo toque.
+  const habitAt =
+    pending?.inferred && !pending.nap
+      ? habitualStart(pending, learnHabit(state.sessions, state.schedule))
+      : null;
 
   return (
     <div className="app">
@@ -116,6 +123,10 @@ export default function App() {
             start={pending.start}
             end={pending.end}
             confidence={pending.confidence}
+            inferred={!!pending.inferred}
+            habitAt={habitAt}
+            habitApplied={!!pending.habitStart}
+            onUseHabit={() => habitAt !== null && dispatch({ type: 'applyHabitStart', id: pending.id, start: habitAt })}
           />
         )}
 
@@ -148,6 +159,7 @@ export default function App() {
       {pending && tab === 'stats' && (
         <SessionSheet
           session={pending}
+          habitualStart={habitAt}
           onSave={saveSession}
           onClose={() => dispatch({ type: 'dismissPending' })}
         />
@@ -160,6 +172,10 @@ function PendingBanner({
   start,
   end,
   confidence,
+  inferred,
+  habitAt,
+  habitApplied,
+  onUseHabit,
   onConfirm,
   onEdit,
   onDismiss,
@@ -167,6 +183,13 @@ function PendingBanner({
   start: number;
   end: number;
   confidence: 'high' | 'medium' | 'low';
+  /** El inicio no está medido: se dice, para que no se confirme a ciegas. */
+  inferred: boolean;
+  /** Tu hora habitual de acostarte puesta en esta noche, si procede ofrecerla. */
+  habitAt: number | null;
+  /** El inicio ya es tu hora habitual, aplicada por ti. */
+  habitApplied: boolean;
+  onUseHabit: () => void;
   onConfirm: () => void;
   onEdit: () => void;
   onDismiss: () => void;
@@ -186,6 +209,26 @@ function PendingBanner({
       <p style={{ fontSize: '0.82rem', color: 'var(--text-muted)', marginTop: 4 }}>
         De {formatClock(start)} a {formatClock(end)}. ¿Es correcto?
       </p>
+      {inferred && (
+        <p style={{ fontSize: '0.82rem', color: 'var(--text-muted)', marginTop: 4 }}>
+          La hora de dormirte no está medida: el móvil no sabe si dormías o
+          estabas despierto sin tocarlo. Ajústala si no es así.
+        </p>
+      )}
+      {habitApplied && (
+        <p style={{ fontSize: '0.82rem', color: 'var(--text-muted)', marginTop: 4 }}>
+          El inicio es tu hora habitual, puesta por ti. Ajústala si esa noche fue distinta.
+        </p>
+      )}
+      {habitAt !== null && (
+        <button
+          className="btn btn--ghost btn--full"
+          style={{ marginTop: 'var(--sp-3)' }}
+          onClick={onUseHabit}
+        >
+          ¿Desde las {formatClock(habitAt)}, como sueles?
+        </button>
+      )}
       <div className="pending__actions">
         <button className="btn btn--ghost" onClick={onDismiss}>No dormí</button>
         <button className="btn btn--ghost" onClick={onEdit}>Ajustar</button>

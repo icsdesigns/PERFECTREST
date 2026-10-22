@@ -28,8 +28,15 @@ import org.json.JSONObject;
 final class RawEventLog {
 
     static final String KEY_RAW = "rawEvents";
-    /** Tope del registro: unos días de pantalla y sensores sin crecer sin fin. */
-    private static final int MAX_EVENTS = 2000;
+    /**
+     * Tope del registro: unos días de pantalla, sensores y contexto del
+     * dispositivo sin crecer sin fin. Los parámetros del sistema sólo se anotan
+     * al cambiar (más una lectura de refresco cada pocas horas), así que apenas
+     * añaden volumen.
+     */
+    private static final int MAX_EVENTS = 3000;
+    /** Cuántas entradas hacia atrás se busca una del mismo tipo con la que fundir. */
+    private static final int MERGE_LOOKBACK = 8;
     /** Cada cuánto se vuelcan a disco los eventos de sensores. */
     private static final long FLUSH_EVERY_MS = 5 * 60_000L;
 
@@ -74,12 +81,9 @@ final class RawEventLog {
     static void addDistinct(Context context, String kind, long withinMs) {
         long now = System.currentTimeMillis();
         synchronized (LOCK) {
-            JSONArray events = load(context);
-            JSONObject last = events.optJSONObject(events.length() - 1);
-            if (last != null && kind.equals(last.optString("kind"))
-                && now - last.optLong("at") < withinMs) {
-                return;
-            }
+            // Con `recent` y no sólo la última entrada: el muestreo de contexto
+            // puede haber intercalado la suya entre el SCREEN_ON y el USER_PRESENT.
+            if (recent(load(context), kind, now, withinMs) != null) return;
         }
         add(context, now, kind, null, true);
     }
@@ -95,9 +99,8 @@ final class RawEventLog {
     ) {
         synchronized (LOCK) {
             JSONArray events = load(context);
-            JSONObject last = events.optJSONObject(events.length() - 1);
-            if (last != null && kind.equals(last.optString("kind"))
-                && Math.abs(at - last.optLong("at")) < withinMs) {
+            JSONObject last = recent(events, kind, at, withinMs);
+            if (last != null) {
                 try {
                     last.put("v", replace ? value : last.optLong("v") + value);
                     dirty = true;
@@ -109,6 +112,24 @@ final class RawEventLog {
             }
         }
         add(context, at, kind, value, false);
+    }
+
+    /**
+     * La entrada más reciente del mismo tipo y a menos de {@code withinMs} de
+     * {@code at}, mirando unas pocas hacia atrás. Mirar sólo la última no
+     * bastaba: el muestreo de contexto intercala sus eventos entre los de un
+     * mismo sensor y cada intercalado impedía fundir los pasos de un minuto o
+     * los cambios de luz seguidos.
+     */
+    static JSONObject recent(JSONArray events, String kind, long at, long withinMs) {
+        int stop = Math.max(0, events.length() - MERGE_LOOKBACK);
+        for (int i = events.length() - 1; i >= stop; i--) {
+            JSONObject e = events.optJSONObject(i);
+            if (e != null && kind.equals(e.optString("kind"))) {
+                return Math.abs(at - e.optLong("at")) < withinMs ? e : null;
+            }
+        }
+        return null;
     }
 
     private static void add(Context context, long at, String kind, Long value, boolean flushNow) {

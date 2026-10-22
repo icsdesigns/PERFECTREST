@@ -1,7 +1,8 @@
 import { useState } from 'react';
 import { Pill } from './ui';
 import { describeTriggers } from '../lib/triggers';
-import { formatDuration } from '../lib/time';
+import { describeContext } from '../lib/sessionContext';
+import { formatClock, formatDuration } from '../lib/time';
 import type { SleepSession } from '../lib/types';
 
 /** Convierte un epoch a los valores que necesita <input type="datetime-local">. */
@@ -18,11 +19,18 @@ const QUALITY_FACES = ['😴', '🙁', '😐', '🙂', '🤩'];
 /** Hoja inferior para crear o corregir una sesión de sueño. */
 export function SessionSheet({
   session,
+  habitualStart = null,
   onSave,
   onDelete,
   onClose,
 }: {
   session: SleepSession;
+  /**
+   * Tu hora habitual de acostarte puesta en esta noche, para ofrecerla como
+   * inicio cuando el inicio no está medido. Sólo se aplica si el usuario toca
+   * el botón.
+   */
+  habitualStart?: number | null;
   onSave: (s: SleepSession) => void;
   onDelete?: (id: string) => void;
   onClose: () => void;
@@ -31,6 +39,8 @@ export function SessionSheet({
   const [end, setEnd] = useState(session.end);
   const [quality, setQuality] = useState(session.quality);
   const [note, setNote] = useState(session.note ?? '');
+  // ¿El inicio es la hora habitual aplicada con el botón? Editar la hora a mano lo deshace.
+  const [habitApplied, setHabitApplied] = useState(!!session.habitStart);
 
   const duration = end - start;
   const invalid = duration <= 0;
@@ -46,6 +56,9 @@ export function SessionSheet({
       note: note.trim() || undefined,
       confirmed: true,
       source: session.source === 'auto' ? 'edited' : session.source,
+      // Revisada por ti: el inicio ya no es una deducción.
+      inferred: undefined,
+      habitStart: habitApplied ? true : undefined,
     });
     onClose();
   };
@@ -68,7 +81,11 @@ export function SessionSheet({
             className="timefield"
             value={toLocalInput(start)}
             aria-label="Inicio del sueño"
-            onChange={(e) => e.target.value && setStart(new Date(e.target.value).getTime())}
+            onChange={(e) => {
+              if (!e.target.value) return;
+              setStart(new Date(e.target.value).getTime());
+              setHabitApplied(false);
+            }}
           />
         </div>
 
@@ -93,6 +110,37 @@ export function SessionSheet({
             </div>
             <Pill tone="muted">{origin}</Pill>
           </div>
+        )}
+
+        {session.inferred && (
+          <div className="row">
+            <div>
+              <div className="row__label">Inicio sin medir</div>
+              <div className="row__hint">
+                El móvil no sabe si a esa hora dormías o estabas despierto sin
+                tocarlo. Ajusta la hora de dormirte si no es así.
+              </div>
+            </div>
+          </div>
+        )}
+
+        {habitualStart !== null && !habitApplied && (
+          <button
+            type="button"
+            className="btn btn--ghost btn--full"
+            style={{ marginTop: 'var(--sp-2)' }}
+            onClick={() => {
+              setStart(habitualStart);
+              setHabitApplied(true);
+            }}
+          >
+            ¿Desde las {formatClock(habitualStart)}, como sueles?
+          </button>
+        )}
+        {habitApplied && (
+          <p className="row__hint" style={{ marginTop: 'var(--sp-2)' }}>
+            El inicio es tu hora habitual, puesta por ti. Cámbiala si esa noche fue distinta.
+          </p>
         )}
 
         <div className="row">
@@ -139,6 +187,8 @@ export function SessionSheet({
           />
         </div>
 
+        <ContextDetails session={session} />
+
         <div className="pending__actions">
           <button className="btn btn--ghost" onClick={onClose}>Cancelar</button>
           <button className="btn btn--primary" onClick={save} disabled={invalid}>Guardar</button>
@@ -158,5 +208,36 @@ export function SessionSheet({
         )}
       </div>
     </div>
+  );
+}
+
+/**
+ * Contexto del dispositivo de la noche, plegado: es material para analizar la
+ * detección, no para leer cada mañana. Sin contexto (sesiones anteriores a la
+ * función, o con el ajuste apagado) no se muestra nada.
+ */
+function ContextDetails({ session }: { session: SleepSession }) {
+  const sections = describeContext(session.context);
+  if (!sections.length) return null;
+  return (
+    <details className="ctx">
+      <summary className="ctx__summary">Contexto del dispositivo</summary>
+      <p className="row__hint">
+        Lo que hizo el móvil entre media hora antes de dormirte y media hora después de despertar.
+        Se calcula y se guarda sólo en este dispositivo: sin ubicación, nombres de redes ni de
+        aparatos, ni contenido de notificaciones.
+      </p>
+      {sections.map((section) => (
+        <div key={section.title} className="ctx__section">
+          <div className="ctx__title">{section.title}</div>
+          {section.rows.map((row) => (
+            <div key={row.label} className="ctx__row">
+              <span className="ctx__label">{row.label}</span>
+              <span className="ctx__value">{row.value}</span>
+            </div>
+          ))}
+        </div>
+      ))}
+    </details>
   );
 }

@@ -351,7 +351,85 @@ const VARIANTS = [
       ],
     },
   },
+  {
+    // Propuesta de inicio dudoso con hábito aprendido: el aviso ofrece «¿Desde
+    // las HH:MM, como sueles?» y la hoja trae el contexto del dispositivo, que
+    // se despliega para auditarlo con sus filas más largas.
+    name: 'dudosa con contexto',
+    state: { ...seeded, pendingSessions: [doubtfulWithContext()] },
+  },
 ];
+
+/** Una propuesta dudosa de anoche (hasta las 07:10) con un contexto lleno. */
+function doubtfulWithContext() {
+  const end = new Date();
+  if (end.getHours() * 60 + end.getMinutes() < 7 * 60 + 10) end.setDate(end.getDate() - 1);
+  end.setHours(7, 10, 0, 0);
+  const e = end.getTime();
+  const s = e - 4.6 * 3600000;
+  const state = (start, finish, pct) => ({ start, end: finish, changes: 2, pct });
+  return {
+    id: 'pend-dudosa',
+    start: s,
+    end: e,
+    source: 'auto',
+    confidence: 'low',
+    confirmed: false,
+    inferred: true,
+    triggers: ['screen', 'idle'],
+    context: {
+      v: 1,
+      collected: e + 3600000,
+      from: s - 1800000,
+      to: e + 1800000,
+      span: { start: s, end: e },
+      device: {
+        model: 'SM-S928B Galaxy S24 Ultra', manufacturer: 'samsung', sdk: 36, release: '16', app: '1.4.0',
+        locale: 'es-ES', tz: 'America/Argentina/Buenos_Aires', tzOffsetMin: -180,
+        batteryExempt: false, exactAlarms: true, notifications: true,
+      },
+      screen: {
+        ons: 14, unlocks: 9, glances: 5, nightUnlocks: 4, nightOns: 7, useSec: 3725, longestSec: 1525,
+        usesSec: [1525, 125, 175, 61, 3, 59, 600, 1200, 45, 90, 12, 300, 15, 2, 999, 3599, 61, 62, 63, 64],
+        onAtStart: false, onAtEnd: true,
+      },
+      power: {
+        plugs: 2, unplugs: 2, chargingPct: 87,
+        chargeType: state(2, 0, { 0: 13, 2: 87 }),
+        battery: { start: 23, end: 100, min: 18, max: 100, changes: 9 },
+        tempC: { min: 24.5, max: 38.9 },
+      },
+      system: {
+        doze: state(0, 1, { 0: 40, 1: 60 }),
+        dnd: state(1, 2, { 1: 30, 2: 70 }),
+        airplane: state(0, 0, { 0: 100 }),
+        powerSave: state(0, 1, { 0: 80, 1: 20 }),
+        ringer: state(2, 1, { 1: 70, 2: 30 }),
+        net: state(1, 4, { 0: 10, 1: 60, 2: 20, 4: 10 }),
+        bt: { start: 0, end: 2, min: 0, max: 2, changes: 2 },
+        bright: { start: 100, end: 4, min: 4, max: 100, changes: 3 },
+        orient: state(1, 2, { 1: 50, 2: 50 }),
+      },
+      sensors: {
+        on: ['steps', 'light', 'proximity', 'posture'],
+        steps: { steps: 12345, motions: 7 },
+        light: { pct: { dark: 80, dim: 15, bright: 5 }, luxMin: 0, luxMax: 31250, changes: 5 },
+        proximity: { coveredPct: 35, changes: 12 },
+        posture: { readings: 28, flatPct: 75, carried: 3, tilted: 4 },
+        audio: { playingPct: 12, starts: 2 },
+        alarm: { at: e - 600000, deltaMin: -10, status: 'cancelled', setAtStart: true },
+      },
+      service: { restarts: 1, errors: 0 },
+      algo: {
+        triggers: ['screen', 'idle'], confidence: 'low', inferred: true, score: 0.42, gapMin: 640,
+        startShiftMin: 155, endShiftMin: -5, latencyMin: 15, latencySource: 'settings',
+        habit: { startMin: 1410, endMin: 435, n: 8 },
+        discards: [{ reason: 'out-of-pattern', startMin: 300, endMin: 480 }, { reason: 'secondary', startMin: 600, endMin: 700 }],
+      },
+      partial: true,
+    },
+  };
+}
 
 for (const variant of VARIANTS) {
 for (const inset of INSETS) {
@@ -395,6 +473,8 @@ for (const width of WIDTHS) {
       else document.querySelector('.iconbtn')?.click();
     }, label);
     await new Promise((r) => setTimeout(r, 260));
+    // Las secciones plegables (contexto de la noche) se auditan desplegadas.
+    await page.evaluate(() => document.querySelectorAll('details').forEach((d) => (d.open = true)));
 
     // Se audita arriba del todo y con la página desplazada al final, que es
     // donde aparecen los problemas con la barra fija.
@@ -430,6 +510,7 @@ for (const width of WIDTHS) {
       });
       if (opened) {
         await new Promise((r) => setTimeout(r, 300));
+        await page.evaluate(() => document.querySelectorAll('details').forEach((d) => (d.open = true)));
         const { problems } = await page.evaluate(auditPage, SCALE);
         for (const pr of problems) {
           const key = `${pr.kind}|${pr.detail}`;

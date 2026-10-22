@@ -14,6 +14,7 @@ import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.content.pm.ServiceInfo;
+import android.media.AudioManager;
 import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
@@ -90,7 +91,7 @@ import java.util.Set;
  * y la capa web decide qué hacer con ellos. Ver {@link #screenInUse(long)}.
  *
  * Junto a los disparadores, un {@link SensorWatcher} opcional registra pasos,
- * luz, proximidad, alarma y audio en el registro bruto ({@link RawEventLog}),
+ * luz, proximidad, alarma, audio y postura del móvil en el registro bruto ({@link RawEventLog}),
  * que la capa web cruza con cada hueco para afinar los bordes de la noche.
  *
  * Todo lo que puede fallar por un permiso que falta —entrar en primer plano,
@@ -178,7 +179,8 @@ public class SleepMonitorService extends Service {
      * mantenimiento, cerraban el hueco de la noche a las dos de la mañana y lo
      * reabrían a los pocos segundos: la noche entera se descartaba en trozos de
      * hora y media y no quedaba nada que proponer. Si la interrupción dura
-     * menos de {@link #REOPEN_GRACE_MS}, el hueco se reanuda desde donde
+     * menos de {@link #REOPEN_GRACE_MS} (con la pantalla, menos de un uso
+     * sostenido: ver {@link #canResume}), el hueco se reanuda desde donde
      * estaba en vez de empezar de cero.
      */
     public static String shortOpenKey(String trigger) {
@@ -187,6 +189,22 @@ public class SleepMonitorService extends Service {
 
     public static String shortCloseKey(String trigger) {
         return "shortCloseAt." + trigger;
+    }
+
+    /**
+     * ¿Fue breve la interrupción, para reanudar el hueco en vez de abrir otro?
+     *
+     * Con la pantalla, `elapsed` es lo que estuvo encendida: desde el
+     * desbloqueo que cerró el hueco hasta que se apagó otra vez. Un vistazo o
+     * una notificación (segundos) no parten la noche, pero un uso sostenido
+     * ({@link #SUSTAINED_USE_MS}, lo mismo que el servicio da por el final de
+     * una noche) sí: lo anterior no es sueño, y reanudar desde el borde viejo
+     * ponía el inicio antes del último uso real del móvil. Los demás
+     * disparadores no miden uso y conservan el margen largo.
+     */
+    static boolean canResume(String trigger, long elapsedMs) {
+        long grace = TRIGGER_SCREEN.equals(trigger) ? SUSTAINED_USE_MS : REOPEN_GRACE_MS;
+        return elapsedMs <= grace;
     }
 
     /** Instante del último aviso «has dormido X», para no repetirlo. */
@@ -257,6 +275,8 @@ public class SleepMonitorService extends Service {
     private boolean foregrounded = false;
 
     private BroadcastReceiver receiver;
+    /** Cambios raros del sistema (modo avión, timbre, ahorro de energía, cargador) para el contexto de la noche. */
+    private BroadcastReceiver contextReceiver;
     private SensorWatcher sensorWatcher;
 
     @Override
@@ -266,8 +286,10 @@ public class SleepMonitorService extends Service {
         createSummaryChannel();
         startInForeground();
         registerDeviceReceiver();
+        registerContextReceiver();
         applySensors();
         primeScreenState();
+        ContextSampler.sample(this, true);
         scheduleWatchdog(this);
     }
 
@@ -280,13 +302,17 @@ public class SleepMonitorService extends Service {
         // Los ajustes pueden haber cambiado entre dos arranques (el usuario
         // activa o desactiva un disparador), así que se vuelve a registrar.
         registerDeviceReceiver();
+        registerContextReceiver();
         applySensors();
         // Cada rearme es también una oportunidad de darse cuenta de que la
         // señal de vuelta se perdió y el hueco lleva horas sin poder cerrarse.
         healStuckGap(System.currentTimeMillis());
-        // El vigilante pasa cada quince minutos: es un momento barato para
-        // preguntar por la alarma y el audio sin ningún temporizador propio.
+        // El vigilante pasa cada quince minutos (diez de noche con el sensor de postura):
+        // es un momento barato para preguntar por la alarma y el audio, y para
+        // una lectura de postura, sin ningún temporizador propio.
         if (sensorWatcher != null) sensorWatcher.sample();
+        // Y de anotar el resto de parámetros del sistema que cambiaron desde la última vez.
+        ContextSampler.sample(this, true);
         scheduleWatchdog(this);
         // START_STICKY: si el sistema mata el servicio por memoria, lo recrea.
         return START_STICKY;
@@ -308,6 +334,7 @@ public class SleepMonitorService extends Service {
     @Override
     public void onDestroy() {
         unregisterDeviceReceiver();
+        unregisterContextReceiver();
         stopWatchingForUnlock();
         wakeWatch.removeCallbacksAndMessages(null);
         if (sensorWatcher != null) sensorWatcher.stopAll();
@@ -361,6 +388,7 @@ public class SleepMonitorService extends Service {
 
     private void applySensors() {
         if (sensorWatcher == null) sensorWatcher = new SensorWatcher(this);
+        sensorWatcher.setContextExtras(ContextSampler.enabled(this));
         sensorWatcher.apply(wantedSensors());
     }
 
@@ -462,8 +490,39 @@ public class SleepMonitorService extends Service {
      * que sí puede arrancar un servicio en primer plano desde segundo plano.
      */
     static void scheduleWatchdog(Context context) {
-        scheduleRestart(context, WATCHDOG_INTERVAL_MS);
+        scheduleRestart(context, watchdogIntervalMs(context));
     }
+
+    /**
+     * Con el sensor de postura el vigilante pasa cada diez minutos en vez de
+     * cada quince: es la cadencia de las lecturas, y dos seguidas en el bolsillo
+     * o la mano son lo que cuenta como un rato despierto. Sigue por encima de
+     * los nueve minutos que Android deja entre dos alarmas en reposo.
+     *
+     * Sólo de noche: fuera de la ventana nocturna no se toma ninguna lectura,
+     * y despertar el móvil cada diez minutos todo el día gastaba batería para
+     * nada. Se mira también la próxima pasada, para no llegar tarde a la
+     * primera lectura de la noche.
+     */
+    static long watchdogIntervalMs(Context context) {
+        String sensors = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getString(KEY_SENSORS, "");
+        boolean posture = false;
+        for (String part : sensors.split(",")) {
+            if (part.trim().equals(SensorWatcher.POSTURE)) posture = true;
+        }
+        long now = System.currentTimeMillis();
+        boolean night = inNightWindow(context, now) || inNightWindow(context, now + WATCHDOG_INTERVAL_MS);
+        return watchdogIntervalMs(posture, night);
+    }
+
+    /** Lógica pura de {@link #watchdogIntervalMs(Context)}, para probarla sin dispositivo. */
+    static long watchdogIntervalMs(boolean postureActive, boolean nightSoon) {
+        return postureActive && nightSoon ? POSTURE_WATCHDOG_INTERVAL_MS : WATCHDOG_INTERVAL_MS;
+    }
+
+    /** Intervalo del vigilante con el sensor de postura activo. */
+    private static final long POSTURE_WATCHDOG_INTERVAL_MS = 10 * 60_000L;
 
     static void scheduleRestart(Context context, long delayMs) {
         AlarmManager alarms = (AlarmManager) context.getSystemService(Context.ALARM_SERVICE);
@@ -565,6 +624,47 @@ public class SleepMonitorService extends Service {
         logEvent(this, null, "service", "escuchando: " + prefs().getString(KEY_TRIGGERS, TRIGGER_SCREEN));
     }
 
+    private void unregisterContextReceiver() {
+        if (contextReceiver == null) return;
+        try {
+            unregisterReceiver(contextReceiver);
+        } catch (IllegalArgumentException ignored) {
+            // Ya estaba dado de baja.
+        }
+        contextReceiver = null;
+    }
+
+    /**
+     * Receptor del contexto del dispositivo. Son difusiones raras (el usuario
+     * activa el modo avión, cambia el timbre o el ahorro de energía, enchufa el
+     * cargador) y todas protegidas: sólo las emite el sistema. Escucharlas no
+     * cuesta nada y permite anotar el cambio a su hora en vez de a la del
+     * siguiente rearme. No se registra nada si el usuario apagó el ajuste.
+     */
+    private void registerContextReceiver() {
+        unregisterContextReceiver();
+        if (!ContextSampler.enabled(this)) return;
+
+        IntentFilter filter = new IntentFilter();
+        filter.addAction(Intent.ACTION_AIRPLANE_MODE_CHANGED);
+        filter.addAction(AudioManager.RINGER_MODE_CHANGED_ACTION);
+        filter.addAction(PowerManager.ACTION_POWER_SAVE_MODE_CHANGED);
+        filter.addAction(Intent.ACTION_POWER_CONNECTED);
+        filter.addAction(Intent.ACTION_POWER_DISCONNECTED);
+
+        contextReceiver = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context context, Intent intent) {
+                ContextSampler.sample(context, true);
+            }
+        };
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(contextReceiver, filter, Context.RECEIVER_EXPORTED);
+        } else {
+            registerReceiver(contextReceiver, filter);
+        }
+    }
+
     private void handleEvent(String action, long now) {
         if (action == null) return;
 
@@ -580,7 +680,8 @@ public class SleepMonitorService extends Service {
                 // cierra el hueco de la noche y éste es el principio de otro.
                 screenWentOff(now);
                 openGap(TRIGGER_SCREEN, now, true);
-                if (sensorWatcher != null) sensorWatcher.sample();
+                if (sensorWatcher != null) sensorWatcher.sample(true);
+                ContextSampler.sample(this, false);
                 break;
 
             case Intent.ACTION_USER_PRESENT:
@@ -598,6 +699,7 @@ public class SleepMonitorService extends Service {
                 // cerrojo unos minutos en vez de esperar a USER_PRESENT.
                 if (!keyguardLocked()) userIsBack(now);
                 else watchForUnlock();
+                ContextSampler.sample(this, false);
                 break;
 
             case Intent.ACTION_POWER_CONNECTED:
@@ -674,7 +776,8 @@ public class SleepMonitorService extends Service {
         long at = now;
         long closedAt = prefs().getLong(shortCloseKey(trigger), 0L);
         long resumeFrom = prefs().getLong(shortOpenKey(trigger), 0L);
-        boolean resumed = closedAt > 0 && resumeFrom > 0 && now - closedAt <= REOPEN_GRACE_MS;
+        boolean resumed = closedAt > 0 && resumeFrom > 0
+            && canResume(trigger, now - closedAt);
         if (resumed) at = resumeFrom;
 
         SharedPreferences.Editor edit = prefs().edit()
@@ -1285,15 +1388,25 @@ public class SleepMonitorService extends Service {
             + clock(start) + " a " + clock(end));
     }
 
-    /** ¿Cae este instante dentro de la ventana nocturna configurada? */
     private boolean inNightWindow(long ts) {
-        int startMin = prefs().getInt(KEY_NIGHT_START, 21 * 60 + 30);
-        int endMin = prefs().getInt(KEY_NIGHT_END, 11 * 60);
+        return inNightWindow(this, ts);
+    }
+
+    /** ¿Cae este instante dentro de la ventana nocturna configurada? */
+    static boolean inNightWindow(Context context, long ts) {
+        SharedPreferences p = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+        int startMin = p.getInt(KEY_NIGHT_START, 21 * 60 + 30);
+        int endMin = p.getInt(KEY_NIGHT_END, 11 * 60);
 
         Calendar cal = Calendar.getInstance();
         cal.setTimeInMillis(ts);
         int m = cal.get(Calendar.HOUR_OF_DAY) * 60 + cal.get(Calendar.MINUTE);
+        return inNightWindow(startMin, endMin, m);
+    }
 
+    /** Lógica pura de la ventana nocturna, en minutos del día. */
+    static boolean inNightWindow(int startMin, int endMin, int minuteOfDay) {
+        int m = minuteOfDay;
         // La ventana cruza medianoche cuando el fin es menor que el inicio.
         return startMin <= endMin ? (m >= startMin && m <= endMin) : (m >= startMin || m <= endMin);
     }

@@ -49,6 +49,12 @@ export const SENSORS: SensorSpec[] = [
     needsPermission: false,
   },
   {
+    id: 'posture',
+    label: 'Postura del móvil',
+    hint: 'Con la pantalla apagada mira cada pocos minutos, durante un par de segundos, si el móvil está plano y quieto (sobre la mesa o la cama) o en el bolsillo o la mano. Plano y quieto cuenta como quietud y sube la confianza; en el bolsillo o la mano aún no estás dormido. Usa el acelerómetro, nunca el micrófono ni la cámara, y no mantiene nada encendido entre lecturas.',
+    needsPermission: false,
+  },
+  {
     id: 'audio',
     label: 'Audio sonando',
     hint: 'Si hay música, un pódcast o un vídeo sonando con la pantalla apagada, aún no te has dormido. No usa el micrófono: sólo pregunta al sistema si algo suena.',
@@ -97,4 +103,5 @@ export const NO_SENSORS: SensorStatus = {
   proximity: { available: false },
   alarm: { available: false },
   audio: { available: false },
+  posture: { available: false },
 };

@@ -82,6 +82,15 @@ interface Device {
 const REOPEN_GRACE_MS = 15 * 60_000;
 /** SPEC: SleepMonitorService.SUSTAINED_USE_MS */
 const SUSTAINED_USE_MS = 5 * 60_000;
+
+/**
+ * SPEC: SleepMonitorService.canResume
+ * Con la pantalla, `elapsed` es lo que estuvo encendida: un vistazo se
+ * reanuda, un uso sostenido no. Los demás disparadores no miden uso.
+ */
+function canResume(trigger: TriggerId, elapsed: number): boolean {
+  return elapsed <= (trigger === 'screen' ? SUSTAINED_USE_MS : REOPEN_GRACE_MS);
+}
 /** SPEC: SleepMonitorService.SUSTAINED_UNLOCKS */
 const SUSTAINED_UNLOCKS = 3;
 /** SPEC: SleepMonitorService.WAKE_CLUSTER_GAP_MS */
@@ -127,7 +136,7 @@ class ServiceModel {
     const closedAt = this.shortClose.get(trigger) ?? 0;
     const resumeFrom = this.shortOpen.get(trigger) ?? 0;
     // Una interrupción breve no parte la noche: se reanuda el hueco anterior.
-    if (closedAt > 0 && resumeFrom > 0 && now - closedAt <= REOPEN_GRACE_MS) {
+    if (closedAt > 0 && resumeFrom > 0 && canResume(trigger, now - closedAt)) {
       at = resumeFrom;
     }
 
@@ -624,6 +633,61 @@ const NIGHTS: Night[] = [
       ev('2026-09-19T07:00:40', 'SCREEN_OFF'),
       ev('2026-09-19T07:50:00', 'SCREEN_ON'),
       ev('2026-09-19T07:50:05', 'USER_PRESENT'),
+    ],
+  },
+  {
+    // Suelta el móvil a las 22:00, lo coge a las 22:30 y lo usa doce minutos
+    // antes de acostarse de verdad. El hueco de las 22:00 era corto (30 min) y
+    // al apagarse otra vez la pantalla se reanudaba desde las 22:00: la noche
+    // empezaba antes del último uso real del móvil.
+    name: 'doce minutos de móvil antes de acostarse no se cuentan como sueño',
+    triggers: ['screen'],
+    device: { keyguardSecure: true, interactive: false },
+    truth: { start: '2026-09-18T22:50:00', end: '2026-09-19T07:00:00' },
+    summaries: 1,
+    events: [
+      ev('2026-09-18T22:00:00', 'SCREEN_OFF'),
+      ev('2026-09-18T22:30:00', 'SCREEN_ON'),
+      ev('2026-09-18T22:30:05', 'USER_PRESENT'),
+      ev('2026-09-18T22:42:00', 'SCREEN_OFF'),
+      ev('2026-09-19T07:00:00', 'SCREEN_ON'),
+      ev('2026-09-19T07:00:05', 'USER_PRESENT'),
+    ],
+  },
+  {
+    // Lo mismo, pero el vistazo es de un minuto: eso sí es una interrupción y
+    // la noche sigue contando desde que soltó el móvil por última vez.
+    name: 'un vistazo de un minuto antes de acostarse no corta nada',
+    triggers: ['screen'],
+    device: { keyguardSecure: true, interactive: false },
+    truth: { start: '2026-09-18T23:00:00', end: '2026-09-19T07:00:00' },
+    summaries: 1,
+    events: [
+      ev('2026-09-18T22:45:00', 'SCREEN_OFF'),
+      ev('2026-09-18T22:50:00', 'SCREEN_ON'),
+      ev('2026-09-18T22:50:05', 'USER_PRESENT'),
+      ev('2026-09-18T22:51:00', 'SCREEN_OFF'),
+      ev('2026-09-19T07:00:00', 'SCREEN_ON'),
+      ev('2026-09-19T07:00:05', 'USER_PRESENT'),
+    ],
+  },
+  {
+    // Ocho horas de tarde sin tocar el móvil, doce minutos de uso a las 22:30
+    // y la noche después. Lo anterior al uso no es sueño y la noche abre un
+    // ciclo propio con su inicio medido (22:42), en vez de pegarse a la tarde.
+    // (No se cuenta el aviso al despertar: el servicio, laxo a propósito, también
+    // avisaría del hueco de la tarde por terminar dentro de la ventana nocturna.)
+    name: 'tarde quieta, uso sostenido y noche con su propio inicio',
+    triggers: ['screen'],
+    device: { keyguardSecure: true, interactive: false },
+    truth: { start: '2026-09-18T22:50:00', end: '2026-09-19T07:00:00' },
+    events: [
+      ev('2026-09-18T14:30:00', 'SCREEN_OFF'),
+      ev('2026-09-18T22:30:00', 'SCREEN_ON'),
+      ev('2026-09-18T22:30:05', 'USER_PRESENT'),
+      ev('2026-09-18T22:42:00', 'SCREEN_OFF'),
+      ev('2026-09-19T07:00:00', 'SCREEN_ON'),
+      ev('2026-09-19T07:00:05', 'USER_PRESENT'),
     ],
   },
 ];

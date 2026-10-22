@@ -10,6 +10,7 @@ import {
 import {
   backgroundStatus,
   clearNativeEvents,
+  clearRawEvents,
   isBackgroundAvailable,
   openAppSettings,
   openNotificationSettings,
@@ -32,6 +33,7 @@ import {
 } from '../lib/triggerLog';
 import { TRIGGERS, TRIGGER_SHORT, triggerEnabled } from '../lib/triggers';
 import { HOUR, formatDuration, relativeDayLabel } from '../lib/time';
+import { MAX_CONTEXTS } from '../lib/sessionContext';
 import { exportRawEvents, exportSessions, type ExportFormat } from '../lib/exportSessions';
 import { useStore } from '../state/store';
 import { useAppUpdate } from '../state/update';
@@ -40,10 +42,12 @@ import { APP_VERSION } from '../lib/updater';
 import type { SensorId, TriggerEvent, TriggerId } from '../lib/types';
 
 export function SettingsScreen() {
-  const { state, patch, dispatch } = useStore();
+  const { state, patch, dispatch, clearContexts, setSaveContext } = useStore();
   const { monitor, theme } = state;
   const [permission, setPermission] = useState<PermissionState>('prompt');
   const [confirmReset, setConfirmReset] = useState(false);
+  const [confirmClearContexts, setConfirmClearContexts] = useState(false);
+  const [confirmClearRaw, setConfirmClearRaw] = useState(false);
   const [exportError, setExportError] = useState(false);
   const [service, setService] = useState<MonitorStatus>({
     running: false,
@@ -419,6 +423,75 @@ export function SettingsScreen() {
             No se pudo exportar. Inténtalo de nuevo.
           </p>
         )}
+
+        <div style={{ marginTop: 'var(--sp-3)' }}>
+          <Toggle
+            checked={monitor.saveContext}
+            onChange={setSaveContext}
+            label="Guardar contexto del dispositivo con cada noche"
+            hint="Para afinar la detección, cada noche guarda un resumen de lo que hizo el móvil entre media hora antes de dormirte y media hora después de despertar: cuántas veces se encendió la pantalla, batería y carga, tipo de red (no su nombre), modo avión, timbre, «no molestar», ahorro de energía, sensores y cómo se detectó la noche, además del modelo de móvil y la versión de Android y de la app. Son recuentos, mínimos, máximos y porcentajes. Nunca ubicación, nombres de redes o de dispositivos Bluetooth, contenido de notificaciones, nombres de apps ni identificadores. Todo se queda en este móvil y sólo sale si tú lo exportas."
+          />
+        </div>
+        <div className="row">
+          <div>
+            <div className="row__label">Noches con contexto</div>
+          </div>
+          <Pill tone="primary">{state.sessions.filter((s) => s.context).length}</Pill>
+        </div>
+        <p style={{ fontSize: '0.76rem', color: 'var(--text-muted)', marginTop: 'var(--sp-2)', lineHeight: 1.55 }}>
+          Se conservan las {MAX_CONTEXTS} noches más recientes (menos de un año); las anteriores
+          pierden el contexto y siguen en el historial.
+        </p>
+        {confirmClearContexts ? (
+          <div className="pending__actions">
+            <button className="btn btn--ghost" onClick={() => setConfirmClearContexts(false)}>
+              Cancelar
+            </button>
+            <button
+              className="btn btn--danger"
+              onClick={() => {
+                clearContexts();
+                setConfirmClearContexts(false);
+              }}
+            >
+              Sí, borrar contextos
+            </button>
+          </div>
+        ) : (
+          <button
+            className="btn btn--ghost btn--full"
+            style={{ marginTop: 'var(--sp-2)' }}
+            disabled={!state.sessions.some((s) => s.context) && !state.pendingSessions.some((s) => s.context)}
+            onClick={() => setConfirmClearContexts(true)}
+          >
+            Borrar contextos guardados
+          </button>
+        )}
+        {backgroundReady &&
+          (confirmClearRaw ? (
+            <div className="pending__actions">
+              <button className="btn btn--ghost" onClick={() => setConfirmClearRaw(false)}>
+                Cancelar
+              </button>
+              <button
+                className="btn btn--danger"
+                onClick={() => {
+                  void clearRawEvents();
+                  setConfirmClearRaw(false);
+                }}
+              >
+                Sí, borrar el registro
+              </button>
+            </div>
+          ) : (
+            <button
+              className="btn btn--ghost btn--full"
+              style={{ marginTop: 'var(--sp-2)' }}
+              onClick={() => setConfirmClearRaw(true)}
+            >
+              Borrar registro bruto
+            </button>
+          ))}
         {confirmReset ? (
           <div className="pending__actions">
             <button className="btn btn--ghost" onClick={() => setConfirmReset(false)}>

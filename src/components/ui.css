@@ -324,3 +324,34 @@
   background: linear-gradient(90deg, var(--primary), var(--mint));
   transition: width 0.5s var(--ease);
 }
+
+/* Contexto del dispositivo de una noche (hoja de sesión). */
+.ctx { margin-top: var(--sp-4); border-top: 1px solid var(--border-soft); padding-top: var(--sp-3); }
+.ctx__summary {
+  cursor: pointer;
+  font-size: 0.88rem;
+  font-weight: 550;
+  padding: var(--sp-2) 0;
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+}
+.ctx__section { margin-top: var(--sp-3); }
+.ctx__title {
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  margin-bottom: var(--sp-1);
+}
+.ctx__row {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  padding: var(--sp-1) 0;
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+.ctx__label { color: var(--text-muted); min-width: 0; flex: 1 1 50%; }
+.ctx__value { text-align: right; min-width: 0; flex: 1 1 50%; overflow-wrap: anywhere; }

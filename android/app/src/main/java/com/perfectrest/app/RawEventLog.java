@@ -160,12 +160,38 @@ final class RawEventLog {
         prefs(context).edit().putString(KEY_RAW, cache.toString()).apply();
         lastFlushAt = now;
         dirty = false;
+        // La misma tanda alimenta el archivo histórico permanente: un único
+        // volcado, sin temporizadores ni wakelocks propios.
+        archive(context, now, false);
+    }
+
+    /**
+     * Pasa al archivo histórico lo que lleve un rato asentado en el anillo (o,
+     * con {@code all}, todo). No hace nada con el histórico desactivado. Con el
+     * cerrojo cogido.
+     */
+    private static void archive(Context context, long now, boolean all) {
+        if (!HistoryArchive.enabled(context)) return;
+        try {
+            HistoryArchive.forContext(context).archiveEvents(load(context), now, all);
+        } catch (java.io.IOException | RuntimeException e) {
+            // El archivo es una copia: si falla (disco lleno…) el anillo sigue
+            // intacto y se reintenta en la siguiente tanda.
+        }
     }
 
     /** Vuelca lo pendiente. Al parar el servicio, para no perder la última tanda. */
     static void flush(Context context) {
         synchronized (LOCK) {
             maybeFlush(context, true);
+            archive(context, System.currentTimeMillis(), true);
+        }
+    }
+
+    /** Archiva lo asentado aunque no haya eventos nuevos (lo llama el vigilante cada rearme). */
+    static void archivePending(Context context) {
+        synchronized (LOCK) {
+            archive(context, System.currentTimeMillis(), false);
         }
     }
 

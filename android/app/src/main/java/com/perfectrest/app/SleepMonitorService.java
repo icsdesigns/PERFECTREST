@@ -128,6 +128,8 @@ public class SleepMonitorService extends Service {
 
     /** Sensores opcionales activos, separados por comas: "steps,light". */
     public static final String KEY_SENSORS = "sensors";
+    /** «Registrar todos los sensores disponibles» (por defecto sí). */
+    public static final String KEY_ALL_SENSORS = "allSensors";
 
     /**
      * Estado del uso de pantalla con un hueco largo abierto: el primer
@@ -311,6 +313,8 @@ public class SleepMonitorService extends Service {
         // es un momento barato para preguntar por la alarma y el audio, y para
         // una lectura de postura, sin ningún temporizador propio.
         if (sensorWatcher != null) sensorWatcher.sample();
+        // Pasa al archivo histórico lo que ya se asentó en el registro bruto.
+        RawEventLog.archivePending(this);
         // Y de anotar el resto de parámetros del sistema que cambiaron desde la última vez.
         ContextSampler.sample(this, true);
         scheduleWatchdog(this);
@@ -387,8 +391,20 @@ public class SleepMonitorService extends Service {
     }
 
     private void applySensors() {
-        if (sensorWatcher == null) sensorWatcher = new SensorWatcher(this);
+        if (sensorWatcher == null) {
+            sensorWatcher = new SensorWatcher(this);
+            // El inventario de sensores va al archivo histórico una vez por arranque del proceso.
+            if (HistoryArchive.enabled(this)) {
+                try {
+                    HistoryArchive.forContext(this).putInventory(SensorCatalog.inventory(
+                        (android.hardware.SensorManager) getSystemService(SENSOR_SERVICE)));
+                } catch (java.io.IOException | RuntimeException ignored) {
+                    // Sin inventario archivado el export lo vuelve a pedir al sistema.
+                }
+            }
+        }
         sensorWatcher.setContextExtras(ContextSampler.enabled(this));
+        sensorWatcher.setAllSensors(prefs().getBoolean(KEY_ALL_SENSORS, true));
         sensorWatcher.apply(wantedSensors());
     }
 

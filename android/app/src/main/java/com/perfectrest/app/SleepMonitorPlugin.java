@@ -105,6 +105,9 @@ public class SleepMonitorPlugin extends Plugin {
             // Guardar el contexto del dispositivo con cada noche (ajuste de la
             // app): si está apagado, el servicio no muestrea nada de eso.
             .putBoolean(ContextSampler.KEY_CONTEXT, call.getBoolean("deviceContext", true))
+            // Archivo histórico permanente y lectura de todos los sensores.
+            .putBoolean(HistoryArchive.PREF_KEEP, call.getBoolean("keepHistory", true))
+            .putBoolean(SleepMonitorService.KEY_ALL_SENSORS, call.getBoolean("allSensors", true))
             // El aviso del despertar lo dispara el servicio, no la web: para
             // eso tiene que conocer el ajuste y la ventana nocturna.
             .putBoolean(SleepMonitorService.KEY_SUMMARY, call.getBoolean("wakeSummary", false))
@@ -350,12 +353,183 @@ public class SleepMonitorPlugin extends Plugin {
             } catch (JSONException ignored) {
                 // Sin catálogo de sensores: el resto de la instantánea sigue valiendo.
             }
+            // Inventario completo de sensores y qué se lee de ellos (sin ids únicos).
+            try {
+                ret.put("sensorInventory", SensorCatalog.inventory(
+                    (android.hardware.SensorManager) getContext().getSystemService(Context.SENSOR_SERVICE)));
+                ret.put("sensorsExcluded", SensorCatalog.excluded());
+                ret.put("permissions", grantedPermissions());
+            } catch (RuntimeException ignored) {
+                // Igual: sin inventario el resto sigue valiendo.
+            }
         } catch (JSONException e) {
             call.reject("No se pudo leer el estado del dispositivo");
             return;
         }
         call.resolve(ret);
     }
+
+    // --- Archivo histórico permanente y exportación única ---
+
+    private HistoryArchive archive() {
+        return HistoryArchive.forContext(getContext());
+    }
+
+    /**
+     * Tamaño y rango del archivo histórico, sólo por metadatos: no lee ni un
+     * evento. Es lo único que la interfaz ve del archivo.
+     */
+    @PluginMethod
+    public void getArchiveInfo(PluginCall call) {
+        try {
+            JSONObject info = archive().info();
+            JSObject ret = new JSObject();
+            ret.put("enabled", HistoryArchive.enabled(getContext()));
+            ret.put("allSensors", prefs().getBoolean(SleepMonitorService.KEY_ALL_SENSORS, true));
+            ret.put("info", info);
+            call.resolve(ret);
+        } catch (JSONException e) {
+            call.reject("No se pudo leer el archivo histórico");
+        }
+    }
+
+    /**
+     * Cambia los interruptores sin reiniciar el servicio. Al activar el archivo
+     * se vuelca de inmediato el anillo actual (migración): se deduplica por
+     * instante y tipo, así que repetirlo no duplica nada.
+     */
+    @PluginMethod
+    public void setHistoryOptions(PluginCall call) {
+        boolean keep = call.getBoolean("keepHistory", true);
+        prefs().edit()
+            .putBoolean(HistoryArchive.PREF_KEEP, keep)
+            .putBoolean(SleepMonitorService.KEY_ALL_SENSORS, call.getBoolean("allSensors", true))
+            .apply();
+        if (keep) RawEventLog.flush(getContext());
+        call.resolve();
+    }
+
+    /** Guarda la última versión de varias noches (con su contexto) en el archivo. */
+    @PluginMethod
+    public void archiveSessions(PluginCall call) {
+        if (!HistoryArchive.enabled(getContext())) {
+            call.resolve();
+            return;
+        }
+        int written = 0;
+        try {
+            JSONArray arr = new JSONArray(call.getString("sessions", "[]"));
+            for (int i = 0; i < arr.length(); i++) {
+                JSONObject s = arr.optJSONObject(i);
+                if (s != null && archive().putSession(s.toString())) written++;
+            }
+        } catch (JSONException | java.io.IOException e) {
+            call.reject("No se pudieron archivar las noches");
+            return;
+        }
+        JSObject ret = new JSObject();
+        ret.put("written", (long) written);
+        call.resolve(ret);
+    }
+
+    /** El usuario borró una noche: su copia del archivo también. */
+    @PluginMethod
+    public void removeArchivedSession(PluginCall call) {
+        String id = call.getString("id", "");
+        if (!id.isEmpty()) archive().removeSession(id);
+        call.resolve();
+    }
+
+    /** «Borrar contextos guardados»: también en el archivo. */
+    @PluginMethod
+    public void stripArchivedContexts(PluginCall call) {
+        try {
+            archive().stripSessionContexts();
+        } catch (java.io.IOException e) {
+            call.reject("No se pudieron borrar los contextos archivados");
+            return;
+        }
+        call.resolve();
+    }
+
+    /** «Borrar archivo histórico»: lo único que borra el archivo. No toca el registro bruto reciente. */
+    @PluginMethod
+    public void clearArchive(PluginCall call) {
+        archive().clear(System.currentTimeMillis());
+        call.resolve();
+    }
+
+    /**
+     * Exportación única: escribe en la caché un solo archivo con todo y devuelve
+     * su nombre. Se escribe en flujo (el archivo histórico entero nunca está en
+     * memoria) y, si es grande, se comprime.
+     */
+    @PluginMethod
+    public void exportAll(PluginCall call) {
+        String name = call.getString("name", "perfectrest-todo.json");
+        String compress = call.getString("compress", "auto");
+        String head = call.getString("head", "{}");
+        String sessions = call.getString("sessions", "[]");
+        Context context = getContext();
+        try {
+            // Lo último del anillo pasa al archivo antes de leerlo.
+            RawEventLog.flush(context);
+            HistoryArchive archive = archive();
+            JSONObject info = archive.info();
+            List<JSONObject> extra = archive.unarchived(RawEventLog.read(context));
+            boolean gzip = "yes".equals(compress) || ("auto".equals(compress)
+                && info.optLong("events") * 45L + info.optLong("readings") * 600L > EXPORT_GZIP_ABOVE_BYTES);
+            // Sin elegir entre dos versiones: el nombre lleva la extensión que toca.
+            String fileName = name.endsWith(".gz") ? name.substring(0, name.length() - 3) : name;
+            if (gzip) fileName += ".gz";
+            java.io.File out = new java.io.File(context.getCacheDir(), fileName);
+            java.io.File[] old = context.getCacheDir().listFiles();
+            if (old != null) {
+                for (java.io.File f : old) {
+                    if (f.getName().startsWith("perfectrest-todo-")) {
+                        //noinspection ResultOfMethodCallIgnored
+                        f.delete();
+                    }
+                }
+            }
+            JSONObject totals;
+            try (java.io.FileOutputStream fos = new java.io.FileOutputStream(out)) {
+                totals = archive.writeExport(fos, gzip, head, sessions, extra);
+                fos.flush();
+                fos.getFD().sync();
+            }
+            JSObject ret = new JSObject();
+            ret.put("name", fileName);
+            ret.put("bytes", out.length());
+            ret.put("gzip", gzip);
+            ret.put("totals", totals);
+            call.resolve(ret);
+        } catch (JSONException | java.io.IOException | RuntimeException e) {
+            call.reject("No se pudo generar la exportación: " + e.getMessage());
+        }
+    }
+
+    /** Permisos que declara la app y si cada uno está concedido (sólo nombres; nada personal). */
+    private JSONObject grantedPermissions() {
+        JSONObject out = new JSONObject();
+        try {
+            Context c = getContext();
+            android.content.pm.PackageInfo info = c.getPackageManager()
+                .getPackageInfo(c.getPackageName(), PackageManager.GET_PERMISSIONS);
+            if (info.requestedPermissions != null) {
+                for (String p : info.requestedPermissions) {
+                    String key = p.substring(p.lastIndexOf('.') + 1);
+                    out.put(key, ContextCompat.checkSelfPermission(c, p) == PackageManager.PERMISSION_GRANTED);
+                }
+            }
+        } catch (PackageManager.NameNotFoundException | JSONException | RuntimeException ignored) {
+            // Sin lista de permisos el resto de la instantánea sigue valiendo.
+        }
+        return out;
+    }
+
+    /** Por encima de este tamaño estimado la exportación se comprime. */
+    private static final long EXPORT_GZIP_ABOVE_BYTES = 6L * 1024 * 1024;
 
     @PluginMethod
     public void clearRawEvents(PluginCall call) {

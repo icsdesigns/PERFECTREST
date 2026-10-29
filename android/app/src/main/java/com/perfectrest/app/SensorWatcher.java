@@ -139,7 +139,7 @@ final class SensorWatcher {
     private int posN = 0;
     /** Lectura aplazada tras apagarse la pantalla (ver {@link #POSTURE_SETTLE_MS}). */
     private final Runnable settledReading = () -> {
-        if (active.contains(POSTURE)) samplePosture(System.currentTimeMillis());
+        if (windowWanted()) samplePosture(System.currentTimeMillis());
     };
     /** Cierre de la lectura en curso cuando se agota su ventana. */
     private final Runnable readingTimeout = () -> endPostureReading(true);
@@ -157,6 +157,18 @@ final class SensorWatcher {
      * escuchas), y los lux de la luz.
      */
     private boolean contextExtras = false;
+    /**
+     * «Registrar todos los sensores disponibles»: en cada ventana corta de la
+     * postura se leen también los demás sensores no sensibles y se archiva un
+     * agregado por sensor (ver {@link SensorCatalog}). Necesita el archivo
+     * histórico activo, que es donde se guardan las lecturas.
+     */
+    private boolean allSensors = false;
+    /** Sensores extra abiertos durante la ventana en curso, y lo que van acumulando. */
+    private SensorEventListener extraListener;
+    private final java.util.Map<String, SensorCatalog.Agg> extraAggs = new java.util.LinkedHashMap<>();
+    /** Por debajo de este nivel de batería (sin cargar) las ventanas sólo leen la postura. */
+    private static final int ALL_SENSORS_MIN_BATTERY = 15;
 
     SensorWatcher(Context context) {
         this.context = context.getApplicationContext();
@@ -191,6 +203,16 @@ final class SensorWatcher {
     /** Activa o apaga las consultas extra del contexto del dispositivo (ver {@link #contextExtras}). */
     void setContextExtras(boolean on) {
         contextExtras = on;
+    }
+
+    /** Activa o apaga la lectura de todos los sensores en las ventanas de muestreo. */
+    void setAllSensors(boolean on) {
+        allSensors = on;
+    }
+
+    /** ¿Hay que abrir ventana de muestreo? Por la postura o por los demás sensores. */
+    private boolean windowWanted() {
+        return active.contains(POSTURE) || (allSensors && HistoryArchive.enabled(context));
     }
 
     void stopAll() {
@@ -452,7 +474,7 @@ final class SensorWatcher {
             audioWasActive = playing;
         }
 
-        if (active.contains(POSTURE)) {
+        if (windowWanted()) {
             if (screenJustOff) {
                 postureHandler.removeCallbacks(settledReading);
                 postureHandler.postDelayed(settledReading, POSTURE_SETTLE_MS);
@@ -471,7 +493,7 @@ final class SensorWatcher {
      * {@link #POSTURE_WINDOW_MS} y lo cierra.
      */
     private void samplePosture(long now) {
-        if (sensors == null || postureListener != null) return;
+        if (sensors == null || postureListener != null || extraListener != null) return;
         if (now - lastPostureAt < POSTURE_MIN_SPACING_MS) return;
         // Con la pantalla encendida el móvil está en uso, no en reposo.
         PowerManager power = (PowerManager) context.getSystemService(Context.POWER_SERVICE);
@@ -479,8 +501,10 @@ final class SensorWatcher {
         // Sólo importa la noche: fuera de ella las lecturas llenarían el registro bruto.
         if (!SleepMonitorService.inNightWindow(context, now)) return;
 
-        Sensor accel = sensors.getDefaultSensor(Sensor.TYPE_ACCELEROMETER);
-        if (accel == null) return;
+        Sensor accel = active.contains(POSTURE) || allSensors
+            ? sensors.getDefaultSensor(Sensor.TYPE_ACCELEROMETER) : null;
+        boolean extras = allSensors && HistoryArchive.enabled(context) && batteryAllows();
+        if (accel == null && !extras) return;
 
         // Sin esto el procesador puede dormirse a mitad de lectura. Se suelta
         // solo: no hay ningún wakelock que alguien tenga que acordarse de liberar.
@@ -508,32 +532,140 @@ final class SensorWatcher {
             @Override
             public void onAccuracyChanged(Sensor sensor, int accuracy) {}
         };
-        boolean ok;
-        try {
-            ok = sensors.registerListener(postureListener, accel, SensorManager.SENSOR_DELAY_UI);
-        } catch (RuntimeException e) {
-            ok = false;
+        boolean ok = false;
+        if (accel != null) {
+            try {
+                ok = sensors.registerListener(postureListener, accel, SensorManager.SENSOR_DELAY_UI);
+            } catch (RuntimeException e) {
+                ok = false;
+            }
         }
-        if (!ok) {
-            postureListener = null;
+        if (!ok) postureListener = null;
+        boolean extraOk = extras && startExtras();
+        if (!ok && !extraOk) {
             releasePostureLock();
             return;
         }
+        if (!ok) {
+            // Sin acelerómetro la ventana sigue por los demás sensores.
+            postureListener = null;
+        }
         postureHandler.postDelayed(readingTimeout, POSTURE_WINDOW_MS);
+    }
+
+    /** ¿Hay batería para leer más sensores? Cargando, siempre. */
+    private boolean batteryAllows() {
+        try {
+            android.content.Intent b = context.registerReceiver(null,
+                new android.content.IntentFilter(android.content.Intent.ACTION_BATTERY_CHANGED));
+            if (b == null) return true;
+            int level = b.getIntExtra(android.os.BatteryManager.EXTRA_LEVEL, -1);
+            int scale = b.getIntExtra(android.os.BatteryManager.EXTRA_SCALE, 100);
+            int plugged = b.getIntExtra(android.os.BatteryManager.EXTRA_PLUGGED, 0);
+            return plugged != 0 || level < 0 || scale <= 0 || level * 100 / scale >= ALL_SENSORS_MIN_BATTERY;
+        } catch (RuntimeException e) {
+            return true;
+        }
+    }
+
+    /**
+     * Abre, para esta ventana, el resto de sensores no sensibles que tenga el
+     * móvil (ver {@link SensorCatalog#SAMPLED_TYPES}). Cada tipo que falte se
+     * ignora. Devuelve si quedó alguno abierto.
+     */
+    private boolean startExtras() {
+        extraAggs.clear();
+        extraListener = new SensorEventListener() {
+            @Override
+            public void onSensorChanged(SensorEvent event) {
+                String key = SensorCatalog.keyOf(event.sensor);
+                SensorCatalog.Agg agg = extraAggs.get(key);
+                if (agg == null) {
+                    agg = new SensorCatalog.Agg();
+                    extraAggs.put(key, agg);
+                }
+                // El paso suelto no trae valor: cuenta como una muestra de 1.
+                agg.add(event.values, event.values == null ? 0 : event.values.length);
+            }
+
+            @Override
+            public void onAccuracyChanged(Sensor sensor, int accuracy) {}
+        };
+        boolean any = false;
+        boolean stepsOk = activityPermissionGranted(context);
+        for (int type : SensorCatalog.SAMPLED_TYPES) {
+            if (type == Sensor.TYPE_ACCELEROMETER) continue; // ya lo lee la postura
+            if (SensorCatalog.needsActivityPermission(type) && !stepsOk) continue;
+            try {
+                Sensor s = sensors.getDefaultSensor(type);
+                if (s == null) continue;
+                // Los disparos únicos y los especiales no se pueden leer así.
+                int mode = s.getReportingMode();
+                if (mode == Sensor.REPORTING_MODE_ONE_SHOT) continue;
+                if (sensors.registerListener(extraListener, s, SensorManager.SENSOR_DELAY_NORMAL)) any = true;
+            } catch (RuntimeException ignored) {
+                // Este sensor falla; los demás siguen.
+            }
+        }
+        if (!any) extraListener = null;
+        return any;
+    }
+
+    /** Cierra los sensores extra y archiva un agregado por sensor. */
+    private void endExtras(boolean record, long now, SensorCatalog.Agg accel) {
+        if (extraListener != null) {
+            if (sensors != null) sensors.unregisterListener(extraListener);
+            extraListener = null;
+        }
+        if (record) {
+            try {
+                if (accel != null && accel.n > 0) extraAggs.put("accelerometer", accel);
+                if (!extraAggs.isEmpty()) {
+                    org.json.JSONObject s = new org.json.JSONObject();
+                    for (java.util.Map.Entry<String, SensorCatalog.Agg> e : extraAggs.entrySet()) {
+                        if (e.getValue().n > 0) s.put(e.getKey(), e.getValue().toJson());
+                    }
+                    if (s.length() > 0 && HistoryArchive.enabled(context)) {
+                        org.json.JSONObject reading = new org.json.JSONObject()
+                            .put("at", now).put("kind", "sensors").put("ms", POSTURE_WINDOW_MS).put("s", s);
+                        HistoryArchive.forContext(context).appendReading(reading, now);
+                    }
+                }
+            } catch (org.json.JSONException | java.io.IOException | RuntimeException ignored) {
+                // Un fallo al archivar no debe tumbar el servicio.
+            }
+        }
+        extraAggs.clear();
     }
 
     /** Cierra la lectura en curso; con {@code record}, clasifica y anota lo recogido. */
     private void endPostureReading(boolean record) {
         postureHandler.removeCallbacks(readingTimeout);
+        SensorCatalog.Agg accel = null;
         if (postureListener != null) {
             if (sensors != null) sensors.unregisterListener(postureListener);
             postureListener = null;
             if (record) {
-                int posture = classifyPosture(posX, posY, posZ, posN);
-                if (posture != POSTURE_INVALID) {
-                    RawEventLog.addSensor(context, System.currentTimeMillis(), "posture", posture);
+                if (allSensors) {
+                    accel = new SensorCatalog.Agg();
+                    float[] v = new float[3];
+                    for (int i = 0; i < posN; i++) {
+                        v[0] = posX[i];
+                        v[1] = posY[i];
+                        v[2] = posZ[i];
+                        accel.add(v, 3);
+                    }
+                }
+                if (active.contains(POSTURE)) {
+                    int posture = classifyPosture(posX, posY, posZ, posN);
+                    if (posture != POSTURE_INVALID) {
+                        RawEventLog.addSensor(context, System.currentTimeMillis(), "posture", posture);
+                    }
                 }
             }
+        }
+        if (extraListener != null || !extraAggs.isEmpty()) {
+            endExtras(record, System.currentTimeMillis(), accel);
         }
         posN = 0;
         releasePostureLock();

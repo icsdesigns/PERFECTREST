@@ -69,6 +69,15 @@ check('Ajustes', wrap(<SettingsScreen />), [
   'Guardar contexto del dispositivo con cada noche',
   'Nunca ubicación',
   'Borrar contextos guardados',
+  // Exportación única y archivo permanente: los controles tienen que estar a la vista.
+  'Exportar todo',
+  'Exportar avanzado',
+  'Exportar CSV',
+  'Conservar histórico sin caducidad',
+  'Nunca ubicación, nombres de redes',
+  'Registrar todos los sensores disponibles',
+  'Archivo histórico',
+  'Borrar archivo histórico',
 ]);
 
 const demo: SleepSession = {

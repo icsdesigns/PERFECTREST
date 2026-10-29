@@ -59,6 +59,22 @@ import {
   summarizeState,
 } from '../src/lib/sessionContext';
 import { DAY, HOUR, MINUTE, formatDuration } from '../src/lib/time';
+import {
+  EXPORT_FORMAT,
+  EXPORT_FORMAT_VERSION,
+  buildExportDocument,
+  buildExportHead,
+  exportSettings,
+} from '../src/lib/exportAll';
+import {
+  ARCHIVE_ESTIMATE_MB_PER_MONTH,
+  estimateArchiveMb,
+  formatArchiveRange,
+  formatBytes,
+  planSessionArchive,
+  syncSessions,
+} from '../src/lib/historyArchive';
+import { initialState } from '../src/state/store';
 import type { MonitorSettings, ScheduleSettings, SensorId, SessionContext, SleepSession } from '../src/lib/types';
 
 let failures = 0;
@@ -1233,6 +1249,152 @@ console.log('\n--- Precisión: los eventos nuevos no mueven la detección ---');
   const b = gatherEvidence(extra, at('2026-09-21T23:30:00'), at('2026-09-22T07:30:00'), ['light', 'steps']);
   assert('la evidencia es idéntica con y sin los eventos de contexto', JSON.stringify(a) === JSON.stringify(b), [a, b]);
   assert('el último uso sostenido tampoco cambia', lastSustainedUse(base, 0, Date.now()) === lastSustainedUse(extra, 0, Date.now()));
+}
+
+
+console.log('\n--- Archivo permanente: la poda del estado no quita datos del archivo ---');
+{
+  // Un archivo de mentira con la misma regla que el nativo (`putSession`): la
+  // copia sin contexto no pisa el contexto ya archivado.
+  const files = new Map<string, SleepSession>();
+  let calls = 0;
+  const fakeNative = async (chunk: SleepSession[]): Promise<number> => {
+    calls++;
+    let written = 0;
+    for (const s of chunk) {
+      const prev = files.get(s.id);
+      const next = !s.context && prev?.context ? { ...s, context: prev.context } : s;
+      if (JSON.stringify(prev) !== JSON.stringify(next)) written++;
+      files.set(s.id, JSON.parse(JSON.stringify(next)));
+    }
+    return written;
+  };
+
+  const base = at('2026-01-01T23:00:00');
+  const night = (i: number): SleepSession => {
+    const start = base + i * DAY;
+    const end = start + 8 * HOUR;
+    return {
+      id: `n${i}`,
+      start,
+      end,
+      source: 'auto',
+      confidence: 'high',
+      confirmed: true,
+      note: i === 3 ? 'me desperté a las 4' : undefined,
+      detectedStart: start - 20 * MINUTE,
+      detectedEnd: end,
+      inferred: i === 5 ? true : undefined,
+      context: buildContext({
+        start, end, now: end + HOUR, sensorsOn: [],
+        events: [{ at: start + HOUR, kind: 'batt', v: 70 }],
+        device: buildDevice({ start, appVersion: '1.0.0', snapshot: null }),
+      }),
+    };
+  };
+  const total = MAX_CONTEXTS + 40;
+  const all = Array.from({ length: total }, (_, i) => night(i));
+
+  // Estado en memoria tras la poda: las 40 noches más antiguas pierden el contexto.
+  const now = all[total - 1].end + HOUR;
+  const pruned = pruneContexts(all, now);
+  assert('la poda del estado sí quita contexto a las noches antiguas',
+    pruned.filter((s) => s.context).length === MAX_CONTEXTS, pruned.filter((s) => s.context).length);
+
+  // La app copia las noches al archivo antes de podar (al hidratar y al guardarlas).
+  let sigs = await syncSessions(all, new Map(), fakeNative);
+  assert('todas las noches quedan archivadas con su contexto', files.size === total && [...files.values()].every((s) => s.context));
+  assert('en tandas de 20: 140 noches son 7 llamadas', calls === Math.ceil(total / 20), calls);
+
+  // Después, el estado podado se vuelve a sincronizar (cambió su huella): el archivo no pierde nada.
+  sigs = await syncSessions(pruned, sigs, fakeNative);
+  assert('tras la poda el archivo conserva el contexto de las 140 noches',
+    files.size === total && [...files.values()].every((s) => s.context));
+  assert('y conserva nota, detectedStart/End e inferred',
+    files.get('n3')?.note === 'me desperté a las 4' && files.get('n3')?.detectedStart === all[3].detectedStart &&
+    files.get('n5')?.inferred === true && files.get('n0')?.detectedEnd === all[0].detectedEnd);
+
+  // Sin cambios no se reenvía nada.
+  const before = calls;
+  sigs = await syncSessions(pruned, sigs, fakeNative);
+  assert('sin cambios no hay ninguna copia nueva', calls === before);
+  const edited = pruned.map((s, i) => (i === 100 ? { ...s, note: 'editada' } : s));
+  const plan = planSessionArchive(edited, sigs);
+  assert('sólo la noche editada se vuelve a copiar', plan.toArchive.length === 1 && plan.toArchive[0].id === 'n100');
+
+  // Si el servicio falla, esa noche no se da por archivada y se reintenta.
+  const failing = await syncSessions(edited, sigs, async () => null);
+  assert('un fallo del servicio no marca la noche como archivada',
+    planSessionArchive(edited, failing).toArchive.length === 1);
+  const throwing = await syncSessions(edited, sigs, async () => { throw new Error('x'); });
+  assert('una excepción tampoco', planSessionArchive(edited, throwing).toArchive.length === 1);
+}
+
+console.log('\n--- Exportación única: esquema ---');
+{
+  const s1: SleepSession = {
+    id: 'a1', start: at('2026-09-20T23:10:00'), end: at('2026-09-21T07:00:00'), source: 'auto', confidence: 'medium',
+    confirmed: true, note: 'hola', detectedStart: at('2026-09-20T22:50:00'), detectedEnd: at('2026-09-21T07:00:00'), inferred: true,
+    context: buildContext({
+      start: at('2026-09-20T23:10:00'), end: at('2026-09-21T07:00:00'), now: at('2026-09-21T08:00:00'), sensorsOn: [], events: [],
+      device: buildDevice({ start: at('2026-09-20T23:10:00'), appVersion: '1.0.0', snapshot: null }),
+    }),
+  };
+  const nowMs = at('2026-09-22T10:00:00');
+  const head = buildExportHead({
+    now: nowMs,
+    state: { sessions: [s1], pendingSessions: [], monitor: initialState.monitor, schedule: initialState.schedule },
+    snapshot: {
+      device: { model: 'Pixel 8', manufacturer: 'Google', sdk: 34, release: '14', tz: 'Europe/Madrid', locale: 'es-ES' },
+      state: { batt: 80 },
+      sensors: { light: { available: true } } as never,
+      sensorInventory: [{ name: 'acc', type: 'accelerometer' }],
+      sensorsExcluded: [{ type: 'heart_rate', reason: 'BODY_SENSORS' }],
+      permissions: { ACTIVITY_RECOGNITION: false },
+    },
+    status: null,
+    archive: { enabled: true, info: { bytes: 1000, files: 2, events: 10, from: at('2026-09-01T00:00:00'), to: at('2026-09-21T00:00:00'), readings: 2, readingsFrom: 0, readingsTo: 0, sessions: 1 } },
+    triggerLog: [{ at: nowMs, kind: 'detect', trigger: 'screen', detail: 'x' } as never],
+  });
+  const doc = buildExportDocument(head, [s1], [{ at: 5, kind: 'plug' }, { at: 1, kind: 'screen-on' }], [{ name: 'acc' }], [{ at: 1, kind: 'sensors' }]);
+  const keys = Object.keys(doc);
+  assert('las claves van en el orden documentado',
+    JSON.stringify(keys) === JSON.stringify(['meta', 'settings', 'habit', 'device', 'pendingSessions', 'triggerLog', 'sensorInventory', 'sessions', 'rawEvents', 'sensorReadings', 'totals']), keys);
+  const meta = doc.meta as Record<string, any>;
+  assert('meta: formato, versión, app, fecha, modelo, Android y zona horaria',
+    meta.format === EXPORT_FORMAT && meta.version === EXPORT_FORMAT_VERSION && meta.app === 'PerfectRest' &&
+    meta.exportedAt === nowMs && meta.device.model === 'Pixel 8' && meta.device.android === '14' && meta.timezone === 'Europe/Madrid', meta);
+  assert('meta: el rango cubre las noches y el archivo',
+    meta.range.from === at('2026-09-01T00:00:00') && meta.range.to === s1.end, meta.range);
+  assert('los eventos del registro bruto salen ordenados', JSON.stringify((doc.rawEvents as RawEvent[]).map((e) => e.at)) === '[1,5]');
+  const out = doc.sessions as SleepSession[];
+  assert('la sesión conserva nota, detectedStart/End, inferred y el contexto completo',
+    out[0].note === 'hola' && out[0].detectedStart === s1.detectedStart && out[0].inferred === true && JSON.stringify(out[0].context) === JSON.stringify(s1.context));
+  assert('totals cuenta lo exportado', JSON.stringify(doc.totals) === JSON.stringify({ sessions: 1, rawEvents: 2, sensorReadings: 1, sensorsInInventory: 1 }), doc.totals);
+  const dev = doc.device as Record<string, any>;
+  assert('la instantánea lleva estado, sensores, permisos y lo que nunca se lee',
+    dev.state.batt === 80 && dev.sensors.light.available && dev.permissions.ACTIVITY_RECOGNITION === false && dev.sensorsNeverRead[0].type === 'heart_rate');
+  assert('el hábito y el registro de disparadores van incluidos', (doc.habit as any).latencyMin === null && (doc.triggerLog as unknown[]).length === 1);
+  const text = JSON.stringify(doc).toLowerCase();
+  assert('nunca ubicación, SSID ni nombres', !/latitude|longitude|ssid|bssid|"location"/.test(text));
+  assert('es JSON válido y se puede releer', JSON.stringify(JSON.parse(JSON.stringify(doc))) === JSON.stringify(doc));
+  const settings = exportSettings(initialState.monitor);
+  assert('los ajustes exportados incluyen los interruptores nuevos y no el detalle interno',
+    settings.keepHistory === true && settings.allSensors === true && !('contextSince' in settings));
+  assert('histórico y todos los sensores vienen activados por defecto',
+    initialState.monitor.keepHistory === true && initialState.monitor.allSensors === true);
+  // El head es JSON que el servicio completa: debe terminar en «}» para que pueda añadirle las listas.
+  assert('la cabecera es un objeto JSON', JSON.stringify(head).startsWith('{') && JSON.stringify(head).endsWith('}'));
+}
+
+console.log('\n--- Archivo permanente: tamaños y fechas ---');
+{
+  assert('formatBytes', formatBytes(0) === '0 B' && formatBytes(900) === '900 B' && formatBytes(2048) === '2.0 KB' && formatBytes(5 * 1024 * 1024) === '5.0 MB' && formatBytes(50 * 1024 * 1024) === '50 MB');
+  assert('rango vacío', formatArchiveRange(0, 0) === null);
+  assert('rango de un día y de varios', formatArchiveRange(at('2026-03-01T10:00:00'), at('2026-03-01T20:00:00'))!.indexOf('–') < 0 &&
+    formatArchiveRange(at('2026-03-01T10:00:00'), at('2026-05-01T20:00:00'))!.includes('–'));
+  assert('estimación: un año ≈ mes abierto + 11 cerrados',
+    Math.abs(estimateArchiveMb(12) - (ARCHIVE_ESTIMATE_MB_PER_MONTH.openMonth + 11 * ARCHIVE_ESTIMATE_MB_PER_MONTH.closedMonth)) < 1e-9 && estimateArchiveMb(12) < 13);
 }
 
 console.log(failures ? `\n${failures} comprobación(es) fallidas` : '\nTodo correcto');

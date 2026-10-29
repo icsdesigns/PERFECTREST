@@ -32,13 +32,18 @@ import {
   stripContexts,
 } from '../lib/sessionContext';
 import { collectContexts } from '../lib/contextCollector';
+import { planSessionArchive, syncSessions } from '../lib/historyArchive';
 import { DEFAULT_TRIGGERS } from '../lib/triggers';
 import { DEFAULT_SENSORS, activeSensors } from '../lib/sensors';
 import { logEvent } from '../lib/triggerLog';
 import { ensureChannel, rescheduleAll, scheduleForegroundReminders } from '../lib/notifications';
 import {
+  archiveSessionsNative,
   isBackgroundAvailable,
   readNotes,
+  removeArchivedSession,
+  setHistoryOptions,
+  stripArchivedContexts,
   removeNotes,
   startBackground,
   stopBackground,
@@ -71,6 +76,8 @@ export const initialState: AppState = {
     sensors: DEFAULT_SENSORS,
     saveContext: true,
     contextSince: 0,
+    keepHistory: true,
+    allSensors: true,
   },
   sessions: [],
   theme: 'dark',
@@ -270,6 +277,12 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       const stored = await loadJSON<Partial<AppState> | null>(STORAGE_KEY, null);
       if (cancelled) return;
       if (stored) {
+        // Antes de podar nada: lo que el estado en memoria está a punto de
+        // olvidar (el contexto de las noches más antiguas) queda en el archivo.
+        // El servicio ignora lo que ya tiene idéntico, así que repetirlo es barato.
+        if (stored.monitor?.keepHistory !== false && stored.sessions?.length) {
+          void syncSessions(stored.sessions, new Map(), async (chunk) => archiveSessionsNative(chunk));
+        }
         // Merge superficial por sección: así los ajustes nuevos de una versión
         // posterior conservan su valor por defecto en estados antiguos.
         dispatch({
@@ -443,6 +456,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         sensors: activeSensors(state.monitor),
         // Si está apagado, el servicio no muestrea nada del contexto.
         deviceContext: state.monitor.saveContext,
+        keepHistory: state.monitor.keepHistory,
+        allSensors: state.monitor.allSensors,
       }).then((running) => {
         // Que el servicio no arranque es silencioso y es la causa número uno
         // de no detectar nada: aquí es donde deja de serlo.
@@ -525,6 +540,39 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       });
   }, [ready, state]);
 
+  // --- Archivo histórico permanente ---
+  // Cada noche guardada (y cada vez que cambia: nota, calidad, contexto) se
+  // copia al archivo nativo. Se guarda la huella de lo ya copiado para no
+  // reenviar el historial entero en cada cambio; si el interruptor se apaga y
+  // vuelve a encenderse, se empieza de cero.
+  const archivedSigs = useRef(new Map<string, string>());
+  const syncingArchive = useRef(false);
+  const [archiveTick, setArchiveTick] = useState(0);
+  const { keepHistory, allSensors } = state.monitor;
+  useEffect(() => {
+    if (!ready) return;
+    archivedSigs.current = new Map();
+    void setHistoryOptions(keepHistory, allSensors);
+  }, [ready, keepHistory, allSensors]);
+  useEffect(() => {
+    if (!ready || !keepHistory || syncingArchive.current || !isBackgroundAvailable()) return;
+    if (!planSessionArchive(state.sessions, archivedSigs.current).toArchive.length) return;
+    syncingArchive.current = true;
+    void syncSessions(state.sessions, archivedSigs.current)
+      .then((done) => {
+        const progressed = done.size > archivedSigs.current.size ||
+          [...done].some(([id, sig]) => archivedSigs.current.get(id) !== sig);
+        archivedSigs.current = done;
+        syncingArchive.current = false;
+        // Si mientras tanto cambió algo, este mismo efecto lo recoge. Sin
+        // avance (el servicio falla) no se reintenta en bucle: espera al siguiente cambio.
+        if (progressed) setArchiveTick((t) => t + 1);
+      })
+      .catch(() => {
+        syncingArchive.current = false;
+      });
+  }, [ready, keepHistory, state.sessions, archiveTick]);
+
   // --- Reprogramación de avisos (Módulo 1) ---
   useEffect(() => {
     if (!ready) return;
@@ -537,8 +585,15 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     (session: SleepSession) => dispatch({ type: 'upsertSession', session }),
     [],
   );
-  const deleteSession = useCallback((id: string) => dispatch({ type: 'removeSession', id }), []);
-  const clearContexts = useCallback(() => dispatch({ type: 'clearContexts', at: Date.now() }), []);
+  const deleteSession = useCallback((id: string) => {
+    dispatch({ type: 'removeSession', id });
+    // Borrar una noche es borrarla también del archivo.
+    void removeArchivedSession(id);
+  }, []);
+  const clearContexts = useCallback(() => {
+    dispatch({ type: 'clearContexts', at: Date.now() });
+    void stripArchivedContexts();
+  }, []);
   const setSaveContext = useCallback((on: boolean) => {
     const { monitor } = stateRef.current;
     // Al reactivarlo sólo se recogen las noches que acaben a partir de ahora:

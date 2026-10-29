@@ -431,6 +431,148 @@ no cubre el tramo queda marcada como `partial`.
   ese momento. **«Borrar registro bruto»** vacía además los eventos que el
   servicio guarda en el móvil.
 
+### Archivo histórico permanente y exportación única
+
+**El problema.** El registro bruto es un anillo de 3000 eventos (~40 h) y el
+estado de la app poda los contextos a 120 noches / 1 año. Para analizar tus
+datos con calma eso caduca demasiado pronto, y había cuatro botones de
+exportar distintos.
+
+**El archivo.** Un archivo histórico en el almacenamiento privado de la app
+(`filesDir/history`, [`HistoryArchive.java`](android/app/src/main/java/com/perfectrest/app/HistoryArchive.java)),
+**sin caducidad ni poda**: sólo lo borra el botón «Borrar archivo histórico».
+
+| Fichero | Contenido |
+| --- | --- |
+| `events-AAAA-MM.jsonl` | cada evento del registro bruto, una línea JSON `{"at","kind","v"}`, por mes (hora local) |
+| `events-AAAA-MM.pN.jsonl.gz` | el mes ya cerrado, comprimido con gzip (N = 1, 2… si llegan eventos tardíos) |
+| `readings-AAAA-MM.jsonl(.gz)` | lecturas agregadas de los sensores (abajo), con el mismo particionado |
+| `sessions/<id>.json` | la última versión de cada noche, con su contexto completo |
+| `inventory.json` | inventario de sensores del móvil |
+| `state.json` | cursor y contadores internos (no son datos) |
+
+- **Sin gasto nuevo.** No hay temporizadores, alarmas ni wakelocks propios: el
+  archivo se alimenta de la misma tanda en que `RawEventLog` ya volcaba a las
+  preferencias (de inmediato con pantalla y cargador, cada 5 min con sensores),
+  más cada rearme del vigilante y la parada del servicio. Un evento se archiva
+  cuando lleva 3 min en el anillo, para que los pasos y la luz que se funden
+  con la entrada anterior no se congelen a medias.
+- **Robusto ante muertes del proceso.** Cada tanda se escribe de una vez al
+  final del fichero y se sincroniza (`fsync`); si el proceso muere a mitad, la
+  última línea queda truncada y se recorta hasta el último salto de línea antes
+  de la siguiente tanda (nunca se toca una línea anterior). El estado y las
+  sesiones se escriben en un temporal y se renombran (atómico). La compresión
+  mensual renombra primero a `.closing`, así que un corte en cualquier punto se
+  reanuda al abrir sin duplicar ni perder nada. Si el estado se pierde, la cola
+  del fichero evita duplicados.
+- **Sin duplicados.** Se deduplica por instante + tipo. La **migración** es lo
+  mismo: al activar el ajuste (o la primera vez que arranca esta versión) se
+  vuelca el anillo actual, y repetirlo no añade nada.
+- **Menos ruido, sin perder lo útil.** `light`/`lux` sólo con la pantalla
+  apagada y sólo al cambiar de nivel (si el nivel cambió con la pantalla
+  encendida, al apagarse se anota el vigente con la hora del apagado);
+  `alarm` sólo si cambia el valor. El resto pasa tal cual.
+- **Las noches** (con nota, `detectedStart/End`, `inferred` y contexto completo)
+  se copian al archivo al guardarse y cada vez que cambian, **antes** de que la
+  poda del estado pueda soltar el contexto. Una copia sin contexto no pisa el
+  que ya había (`putSession` lo conserva). Borrar una noche borra su copia;
+  «Borrar contextos guardados» los quita también del archivo.
+- **La interfaz no lee el histórico.** Ajustes sólo muestra tamaño y rango, que
+  salen de los metadatos de los ficheros y de un contador (`getArchiveInfo`).
+
+**Qué se guarda y qué no.** Los mismos campos que el registro bruto actual
+(pantalla, cargador, sensores y parámetros del sistema, cada uno con su hora)
+más las lecturas de sensores y las noches. Nunca ubicación, nombres de redes
+ni de dispositivos Bluetooth, apps, contenido de notificaciones ni
+identificadores. Todo se queda en el móvil y sólo sale si tú exportas.
+Interruptor **«Conservar histórico sin caducidad»** (activado por defecto);
+apagado, deja de archivar pero no borra lo que hay. **«Restablecer la
+aplicación»** no toca el archivo; se borra con su botón, con confirmación.
+
+**Tamaño estimado** (con el uso de referencia de ~1800 eventos/día; es una
+estimación, Ajustes muestra el real):
+
+| | sin comprimir | mes cerrado (gzip) |
+| --- | --- | --- |
+| eventos filtrados (~40 000 líneas de ~40 B) | ~1,6 MB | ~0,26 MB |
+| lecturas de sensores (~50 ventanas/noche × 1,4 KB) | ~2,2 MB | ~0,55 MB |
+| noches con contexto (~2 KB) | ~60 KB | — |
+
+Es decir, **~3,8 MB el mes en curso y ~0,8 MB por mes cerrado**: unos
+12,6 MB tras un año. Las lecturas se midieron con números aleatorios, que
+comprimen peor que los reales, así que es una cota alta.
+
+#### Todos los sensores
+
+- **Inventario** (`SensorCatalog.inventory`): todo lo que devuelve
+  `getSensorList(TYPE_ALL)` —nombre, fabricante, tipo, rango, resolución,
+  consumo en mA, retardos, FIFO, modo de reporte, si despierta el procesador y
+  si es dinámico—. No se lee `getId()` ni nada único del dispositivo. Va al
+  archivo y a la instantánea del export.
+- **Lecturas** (`SensorWatcher`, interruptor **«Registrar todos los sensores
+  disponibles»**, activado por defecto): reutiliza la ventana corta de la
+  postura (~2,5 s, con la pantalla apagada y de noche, como mucho una cada 4
+  min, con el mismo wakelock que se suelta solo) y abre además los demás
+  sensores en `SENSOR_DELAY_NORMAL`. Por sensor y ventana guarda `n`, media,
+  mínimo, máximo y desviación por eje: **agregados, no series crudas**.
+  Acelerómetro, gravedad, aceleración lineal, giroscopio, magnetómetro,
+  presión, temperatura ambiente, humedad, luz, proximidad, vectores de rotación
+  (normal, de juego y geomagnético), orientación, orden del dispositivo, ángulo
+  de bisagra y detección de retirada del cuerpo; pasos (contador y detector)
+  sólo si «Actividad física» ya está concedido. Lo que el móvil no tiene se
+  omite sin más.
+- **Por qué activado por defecto.** No hay escucha permanente: son ~2,5 s a
+  baja frecuencia, no más de una vez cada 4 min y sólo con la pantalla apagada
+  en la ventana nocturna, sobre una ventana de postura que ya existía. Es del
+  orden de décimas de mAh por noche. Aun así se omite por debajo del 15 % de
+  batería sin cargar. Necesita «Conservar histórico», que es donde se guarda.
+- **Fuera, y por qué:** ritmo cardíaco y latido (permiso peligroso
+  `BODY_SENSORS`); movimiento significativo, estacionario y de movimiento
+  (disparo único, no se pueden leer en una ventana; el significativo ya genera
+  su evento `motion`); las variantes sin calibrar (duplican a las calibradas).
+  El export lleva esa lista en `device.sensorsNeverRead`. No se añade ningún
+  permiso.
+
+**Exportación única.** En Ajustes, **«Exportar todo»** genera **un solo
+archivo** `perfectrest-todo-AAAA-MM-DD.json` (o `.json.gz` si la estimación
+supera ~6 MB) y abre la hoja de compartir. El servicio lo escribe en la caché
+**en flujo**, línea a línea, sin cargar el histórico en memoria; la interfaz
+sólo pasa la cabecera y las noches. Los botones de siempre (historial CSV/JSON,
+registro bruto CSV/JSON) siguen en **«Exportar avanzado»**.
+
+Esquema (versión 1; las claves van siempre en este orden):
+
+```
+{
+  "meta":     { format: "perfectrest-export", version: 1, app, appVersion, exportedAt, exportedAtIso,
+                timezone, tzOffsetMin, locale, device { model, manufacturer, android, sdk },
+                range { from, to }, archive { enabled, events, readings, bytes, from, to } | null, notes[] },
+  "settings": { enabled, minGapMinutes, maxGapMinutes, nightStart, nightEnd, autoConfirm, wakeSummary,
+                background, triggers{}, sensors{}, saveContext, keepHistory, allSensors },
+  "habit":    { startMin, endMin, n, spreadMin?, latencyMin } ,
+  "device":   { info, state{}, sensors{}, sensorsNeverRead[], permissions{}, service{} },
+  "pendingSessions": [ ... ],
+  "triggerLog": [ ... ],            // registro de la detección y del algoritmo (últimos 200)
+  "sensorInventory": [ ... ],       // getSensorList(TYPE_ALL)
+  "sessions": [ ... ],              // todas, por inicio, con contexto completo (también las podadas)
+  "rawEvents": [ {"at","kind","v"?} ... ],       // TODO el registro bruto archivado
+  "sensorReadings": [ {"at","kind":"sensors","ms","s":{<sensor>:{"n","mean":[],"min":[],"max":[],"sd":[]}}} ... ],
+  "totals":   { sessions, rawEvents, sensorReadings, sensorsInInventory }
+}
+```
+
+Los tipos de `rawEvents` están en [`rawEvents.ts`](src/lib/rawEvents.ts). El
+esquema también está documentado en [`exportAll.ts`](src/lib/exportAll.ts). En
+el navegador (sin servicio) el archivo sale igual pero con `rawEvents`,
+`sensorReadings` y `sensorInventory` vacíos y una nota en `meta.notes`.
+
+**Límites.** El registro de la detección (`triggerLog`) sólo guarda los últimos
+200 eventos y no se archiva aparte. Lo que se funde con la entrada anterior
+tras archivarse (p. ej. un paso del último minuto antes de parar el servicio)
+no actualiza la copia. Con «Conservar histórico» apagado no hay lecturas de
+sensores. Un cambio del interruptor de sensores llega al servicio en el
+siguiente rearme del vigilante (≤15 min) o al reiniciarlo.
+
 ### La hora habitual, a petición
 
 Una propuesta con el inicio sin medir (`inferred`) y un hábito aprendido de tus
@@ -522,6 +664,11 @@ hueco— se prueba con JUnit
 códigos de carga y red, cuenta de auriculares Bluetooth y fusión de eventos del
 registro bruto— en
 [`ContextSamplerTest.java`](android/app/src/test/java/com/perfectrest/app/ContextSamplerTest.java);
+el archivo histórico y el inventario de sensores —partición mensual,
+deduplicación, línea truncada, compresión, filtro de luz y alarma, sesiones y
+exportación en flujo— en
+[`HistoryArchiveTest.java`](android/app/src/test/java/com/perfectrest/app/HistoryArchiveTest.java) y
+[`SensorCatalogTest.java`](android/app/src/test/java/com/perfectrest/app/SensorCatalogTest.java);
 sin Gradle se puede compilar con `javac` contra el
 `android-all` de Robolectric (Maven Central, API 34) y stubs mínimos de
 Capacitor y AndroidX, y ejecutar con `JUnitCore`.
@@ -802,6 +949,8 @@ src/
     sensors.ts           Módulo 3: catálogo de sensores opcionales
     sessionContext.ts    Módulo 3: contexto del dispositivo de cada noche (puro)
     contextCollector.ts  Módulo 3: recogida del contexto desde el plugin
+    historyArchive.ts    Módulo 3: archivo histórico permanente (copia de noches, tamaños)
+    exportAll.ts         Módulo 3: exportación única (esquema y entrega)
     updater.ts           Autoactualización: API de GitHub y versiones
     triggers.ts          Módulo 3: catálogo de disparadores
     triggerLog.ts        Módulo 3: registro de señales, huecos y descartes

@@ -10,10 +10,12 @@ import {
 import {
   backgroundStatus,
   clearNativeEvents,
+  clearArchive,
   clearRawEvents,
   isBackgroundAvailable,
   openAppSettings,
   openNotificationSettings,
+  readArchiveInfo,
   readNativeEvents,
   readRawEvents,
   readSensorStatus,
@@ -21,6 +23,7 @@ import {
   requestExactAlarms,
   requestSensorPermission,
   simulateGap,
+  type ArchiveInfo,
   type MonitorStatus,
 } from '../lib/backgroundMonitor';
 import { NO_SENSORS, SENSORS, sensorEnabled, type SensorStatus } from '../lib/sensors';
@@ -35,6 +38,12 @@ import { TRIGGERS, TRIGGER_SHORT, triggerEnabled } from '../lib/triggers';
 import { HOUR, formatDuration, relativeDayLabel } from '../lib/time';
 import { MAX_CONTEXTS } from '../lib/sessionContext';
 import { exportRawEvents, exportSessions, type ExportFormat } from '../lib/exportSessions';
+import { exportEverything } from '../lib/exportAll';
+import {
+  ARCHIVE_ESTIMATE_MB_PER_MONTH,
+  formatArchiveRange,
+  formatBytes,
+} from '../lib/historyArchive';
 import { useStore } from '../state/store';
 import { useAppUpdate } from '../state/update';
 import { UpdateBanner } from '../components/UpdateBanner';
@@ -49,6 +58,9 @@ export function SettingsScreen() {
   const [confirmClearContexts, setConfirmClearContexts] = useState(false);
   const [confirmClearRaw, setConfirmClearRaw] = useState(false);
   const [exportError, setExportError] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [confirmClearArchive, setConfirmClearArchive] = useState(false);
+  const [archiveInfo, setArchiveInfo] = useState<ArchiveInfo | null>(null);
   const [service, setService] = useState<MonitorStatus>({
     running: false,
     enabled: false,
@@ -72,6 +84,29 @@ export function SettingsScreen() {
         if (!/cancel/i.test(String(e?.message ?? e))) setExportError(true);
       });
   };
+
+  /** Un solo archivo con todo: ajustes, hábito, noches, instantánea, sensores y todo el histórico. */
+  const doExportAll = () => {
+    setExportError(false);
+    setExporting(true);
+    exportEverything(state)
+      .catch((e) => {
+        if (!/cancel/i.test(String(e?.message ?? e))) setExportError(true);
+      })
+      .finally(() => setExporting(false));
+  };
+
+  // Tamaño y rango del archivo: sólo metadatos, nunca los datos.
+  useEffect(() => {
+    if (!backgroundReady) return;
+    let alive = true;
+    void readArchiveInfo().then((r) => {
+      if (alive && r) setArchiveInfo(r.info);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [backgroundReady, monitor.keepHistory, confirmClearArchive]);
 
   const doExport = (format: ExportFormat) => {
     setExportError(false);
@@ -386,43 +421,124 @@ export function SettingsScreen() {
           </div>
           <Pill tone="primary">{state.sessions.length}</Pill>
         </div>
-        <div className="pending__actions" style={{ marginTop: 'var(--sp-3)' }}>
-          <button
-            className="btn btn--ghost"
-            disabled={state.sessions.length === 0}
-            onClick={() => doExport('csv')}
-          >
-            Exportar CSV
-          </button>
-          <button
-            className="btn btn--ghost"
-            disabled={state.sessions.length === 0}
-            onClick={() => doExport('json')}
-          >
-            Exportar JSON
-          </button>
-        </div>
-        {backgroundReady && (
-          <>
-            <p style={{ fontSize: '0.76rem', color: 'var(--text-muted)', marginTop: 'var(--sp-3)', lineHeight: 1.55 }}>
-              El registro bruto es cada evento que vio el servicio —pantalla, cargador y
-              sensores— con su hora. Sirve para revisar por qué una noche salió como salió.
-            </p>
-            <div className="pending__actions" style={{ marginTop: 'var(--sp-2)' }}>
-              <button className="btn btn--ghost" onClick={() => doExportRaw('csv')}>
-                Registro bruto CSV
-              </button>
-              <button className="btn btn--ghost" onClick={() => doExportRaw('json')}>
-                Registro bruto JSON
-              </button>
-            </div>
-          </>
-        )}
+        <button
+          className="btn btn--primary btn--full"
+          style={{ marginTop: 'var(--sp-3)' }}
+          disabled={exporting}
+          onClick={doExportAll}
+        >
+          {exporting ? 'Preparando el archivo…' : 'Exportar todo'}
+        </button>
+        <p style={{ fontSize: '0.76rem', color: 'var(--text-muted)', marginTop: 'var(--sp-2)', lineHeight: 1.55 }}>
+          Un único archivo (JSON; comprimido si es grande) con tus noches y su contexto, los
+          ajustes de detección, el hábito aprendido, el estado actual del móvil y de sus sensores, el
+          registro de la detección y todo el histórico guardado. Pensado para enviarlo de una vez.
+        </p>
+        <details className="ctx">
+          <summary className="ctx__summary">Exportar avanzado</summary>
+          <div className="pending__actions">
+            <button
+              className="btn btn--ghost"
+              disabled={state.sessions.length === 0}
+              onClick={() => doExport('csv')}
+            >
+              Exportar CSV
+            </button>
+            <button
+              className="btn btn--ghost"
+              disabled={state.sessions.length === 0}
+              onClick={() => doExport('json')}
+            >
+              Exportar JSON
+            </button>
+          </div>
+          {backgroundReady && (
+            <>
+              <p style={{ fontSize: '0.76rem', color: 'var(--text-muted)', marginTop: 'var(--sp-3)', lineHeight: 1.55 }}>
+                El registro bruto es cada evento que vio el servicio —pantalla, cargador y
+                sensores— con su hora. Sirve para revisar por qué una noche salió como salió.
+                Estos botones sólo exportan lo reciente; «Exportar todo» incluye todo el histórico.
+              </p>
+              <div className="pending__actions" style={{ marginTop: 'var(--sp-2)' }}>
+                <button className="btn btn--ghost" onClick={() => doExportRaw('csv')}>
+                  Registro bruto CSV
+                </button>
+                <button className="btn btn--ghost" onClick={() => doExportRaw('json')}>
+                  Registro bruto JSON
+                </button>
+              </div>
+            </>
+          )}
+        </details>
         {exportError && (
           <p style={{ fontSize: '0.76rem', color: 'var(--amber)', marginTop: 'var(--sp-2)' }}>
             No se pudo exportar. Inténtalo de nuevo.
           </p>
         )}
+
+        <div style={{ marginTop: 'var(--sp-3)' }}>
+          <Toggle
+            checked={monitor.keepHistory}
+            onChange={(v) => patch({ monitor: { ...monitor, keepHistory: v } })}
+            label="Conservar histórico sin caducidad"
+            hint="Guarda en este móvil, sin límite de tiempo ni poda, todo lo que ve el servicio —el registro bruto con los mismos campos de siempre (pantalla, cargador, sensores y parámetros del sistema, con su hora), las lecturas de los sensores y tus noches con su contexto—, por meses y comprimido al cerrar cada mes. Reduce el ruido antes de guardar (la luz sólo con la pantalla apagada y al cambiar de nivel; la alarma sólo si cambia). Todo es local y nunca sale si no lo exportas. Nunca ubicación, nombres de redes o de dispositivos, apps ni notificaciones."
+          />
+          <Toggle
+            checked={monitor.allSensors}
+            onChange={(v) => patch({ monitor: { ...monitor, allSensors: v } })}
+            label="Registrar todos los sensores disponibles"
+            hint="En las lecturas cortas de la noche (unos 2,5 s cada pocos minutos, con la pantalla apagada) guarda también un resumen —media, mínimo, máximo y desviación— de cada sensor que tenga el móvil: acelerómetro, giroscopio, brújula, presión, temperatura, humedad, luz y demás. Sin ritmo cardíaco ni sensores que pidan permisos sensibles. No usa batería apreciable: reutiliza la lectura de la postura y se omite con menos de un 15 % sin cargar. Necesita conservar el histórico."
+          />
+        </div>
+        <>
+            <div className="row">
+              <div>
+                <div className="row__label">Archivo histórico</div>
+                <div className="row__hint">
+                  {archiveInfo && archiveInfo.bytes > 0
+                    ? `${formatArchiveRange(archiveInfo.from || archiveInfo.readingsFrom, archiveInfo.to || archiveInfo.readingsTo) ?? 'Sin eventos aún'} · ${archiveInfo.events} eventos, ${archiveInfo.readings} lecturas de sensores`
+                    : 'Vacío por ahora'}
+                </div>
+              </div>
+              <Pill tone="primary">{formatBytes(archiveInfo?.bytes ?? 0)}</Pill>
+            </div>
+            <p style={{ fontSize: '0.76rem', color: 'var(--text-muted)', marginTop: 'var(--sp-2)', lineHeight: 1.55 }}>
+              Crece unos {ARCHIVE_ESTIMATE_MB_PER_MONTH.closedMonth.toString().replace('.', ',')} MB por mes
+              ya cerrado (el mes en curso, hasta ~{ARCHIVE_ESTIMATE_MB_PER_MONTH.openMonth.toString().replace('.', ',')} MB
+              sin comprimir). Es una estimación: aquí ves el tamaño real.
+            </p>
+            {confirmClearArchive ? (
+              <div className="pending__actions">
+                <button className="btn btn--ghost" onClick={() => setConfirmClearArchive(false)}>
+                  Cancelar
+                </button>
+                <button
+                  className="btn btn--danger"
+                  onClick={() => {
+                    void clearArchive().then(() => setArchiveInfo(null));
+                    setConfirmClearArchive(false);
+                  }}
+                >
+                  Sí, borrar el histórico
+                </button>
+              </div>
+            ) : (
+              <button
+                className="btn btn--ghost btn--full"
+                style={{ marginTop: 'var(--sp-2)' }}
+                disabled={!backgroundReady}
+                onClick={() => setConfirmClearArchive(true)}
+              >
+                Borrar archivo histórico
+              </button>
+            )}
+            {confirmClearArchive && (
+              <p style={{ fontSize: '0.76rem', color: 'var(--amber)', marginTop: 'var(--sp-2)', lineHeight: 1.55 }}>
+                Se borra para siempre todo el histórico guardado, incluidas las copias de tus noches
+                con su contexto. Tus noches en la app no se tocan.
+              </p>
+            )}
+        </>
 
         <div style={{ marginTop: 'var(--sp-3)' }}>
           <Toggle
@@ -439,8 +555,9 @@ export function SettingsScreen() {
           <Pill tone="primary">{state.sessions.filter((s) => s.context).length}</Pill>
         </div>
         <p style={{ fontSize: '0.76rem', color: 'var(--text-muted)', marginTop: 'var(--sp-2)', lineHeight: 1.55 }}>
-          Se conservan las {MAX_CONTEXTS} noches más recientes (menos de un año); las anteriores
-          pierden el contexto y siguen en el historial.
+          La app muestra el contexto de las {MAX_CONTEXTS} noches más recientes (menos de un año);
+          las anteriores lo pierden aquí pero, con el histórico activado, siguen con su contexto en
+          el archivo y en «Exportar todo».
         </p>
         {confirmClearContexts ? (
           <div className="pending__actions">

@@ -101,6 +101,34 @@ export interface DeviceSnapshot {
   };
   state?: Record<string, number | boolean | undefined>;
   sensors?: Partial<SensorStatus>;
+  /** Todos los sensores del móvil (`getSensorList(TYPE_ALL)`), sin ids únicos. */
+  sensorInventory?: Array<Record<string, unknown>>;
+  /** Tipos de sensor que nunca se leen, con el motivo. */
+  sensorsExcluded?: Array<{ type: string; reason: string }>;
+  /** Permisos que declara la app y si cada uno está concedido (sólo nombres). */
+  permissions?: Record<string, boolean>;
+}
+
+/** Metadatos del archivo histórico (nunca sus datos). */
+export interface ArchiveInfo {
+  bytes: number;
+  files: number;
+  events: number;
+  /** Primer y último evento archivados (epoch ms; 0 si está vacío). */
+  from: number;
+  to: number;
+  readings: number;
+  readingsFrom: number;
+  readingsTo: number;
+  sessions: number;
+}
+
+/** Cuánto contiene la exportación única, tal como lo cuenta el servicio al escribirla. */
+export interface ExportTotals {
+  sessions: number;
+  rawEvents: number;
+  sensorReadings: number;
+  sensorsInInventory: number;
 }
 
 interface SleepMonitorPlugin {
@@ -117,6 +145,10 @@ interface SleepMonitorPlugin {
     sensors?: SensorId[];
     /** Muestrear el estado del dispositivo para el contexto de cada noche. */
     deviceContext?: boolean;
+    /** Conservar el histórico sin caducidad (ver `historyArchive.ts`). */
+    keepHistory?: boolean;
+    /** Leer todos los sensores no sensibles en las ventanas de muestreo. */
+    allSensors?: boolean;
   }): Promise<{ running: boolean }>;
   stop(): Promise<{ running: boolean }>;
   isRunning(): Promise<MonitorStatus>;
@@ -134,6 +166,20 @@ interface SleepMonitorPlugin {
   clearRawEvents(): Promise<void>;
   /** Datos estáticos del móvil y estado de ahora mismo, para el contexto de la noche. */
   getDeviceSnapshot(): Promise<DeviceSnapshot>;
+  /** Archivo histórico permanente: tamaño y rango por metadatos, sin leer datos. */
+  getArchiveInfo(): Promise<{ enabled: boolean; allSensors: boolean; info: ArchiveInfo }>;
+  setHistoryOptions(options: { keepHistory: boolean; allSensors: boolean }): Promise<void>;
+  archiveSessions(options: { sessions: string }): Promise<{ written: number }>;
+  removeArchivedSession(options: { id: string }): Promise<void>;
+  stripArchivedContexts(): Promise<void>;
+  clearArchive(): Promise<void>;
+  /** Escribe la exportación única en la caché, en flujo, y devuelve el nombre del archivo. */
+  exportAll(options: {
+    name: string;
+    head: string;
+    sessions: string;
+    compress: 'auto' | 'yes' | 'no';
+  }): Promise<{ name: string; bytes: number; gzip: boolean; totals: ExportTotals }>;
   /** Qué sensores tiene el móvil y cuáles puede usar con los permisos actuales. */
   sensorStatus(): Promise<{ sensors: SensorStatus }>;
   /** Pide el permiso «Actividad física» (pasos). Devuelve si quedó concedido. */
@@ -187,6 +233,10 @@ export interface BackgroundOptions {
   sensors?: SensorId[];
   /** Muestrear el estado del dispositivo para el contexto de cada noche (por defecto sí). */
   deviceContext?: boolean;
+  /** Conservar el histórico sin caducidad (por defecto sí). */
+  keepHistory?: boolean;
+  /** Leer todos los sensores no sensibles en las ventanas de muestreo (por defecto sí). */
+  allSensors?: boolean;
 }
 
 export async function startBackground(options: BackgroundOptions): Promise<boolean> {
@@ -431,6 +481,82 @@ export async function readDeviceSnapshot(): Promise<DeviceSnapshot | null> {
   } catch {
     return null;
   }
+}
+
+// --- Archivo histórico permanente ----------------------------------------------
+
+/** Tamaño y rango del archivo histórico; null sin servicio nativo o con un plugin antiguo. */
+export async function readArchiveInfo(): Promise<{
+  enabled: boolean;
+  allSensors: boolean;
+  info: ArchiveInfo;
+} | null> {
+  if (!isBackgroundAvailable()) return null;
+  try {
+    return await SleepMonitor.getArchiveInfo();
+  } catch {
+    return null;
+  }
+}
+
+/** Aplica los interruptores del histórico al servicio sin reiniciarlo. */
+export async function setHistoryOptions(keepHistory: boolean, allSensors: boolean): Promise<void> {
+  if (!isBackgroundAvailable()) return;
+  try {
+    await SleepMonitor.setHistoryOptions({ keepHistory, allSensors });
+  } catch {
+    /* plugin antiguo: el valor viaja también con `start` */
+  }
+}
+
+/** Copia las noches (con su contexto) al archivo. Devuelve cuántas se escribieron. */
+export async function archiveSessionsNative(sessions: unknown[]): Promise<number> {
+  if (!isBackgroundAvailable() || !sessions.length) return 0;
+  try {
+    const { written } = await SleepMonitor.archiveSessions({ sessions: JSON.stringify(sessions) });
+    return written;
+  } catch {
+    return 0;
+  }
+}
+
+export async function removeArchivedSession(id: string): Promise<void> {
+  if (!isBackgroundAvailable()) return;
+  try {
+    await SleepMonitor.removeArchivedSession({ id });
+  } catch {
+    /* sin archivo no hay copia que borrar */
+  }
+}
+
+export async function stripArchivedContexts(): Promise<void> {
+  if (!isBackgroundAvailable()) return;
+  try {
+    await SleepMonitor.stripArchivedContexts();
+  } catch {
+    /* ídem */
+  }
+}
+
+export async function clearArchive(): Promise<boolean> {
+  if (!isBackgroundAvailable()) return false;
+  try {
+    await SleepMonitor.clearArchive();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Pide al servicio que escriba la exportación única en la caché. */
+export async function exportAllNative(options: {
+  name: string;
+  head: string;
+  sessions: string;
+  compress?: 'auto' | 'yes' | 'no';
+}): Promise<{ name: string; bytes: number; gzip: boolean; totals: ExportTotals } | null> {
+  if (!isBackgroundAvailable()) return null;
+  return SleepMonitor.exportAll({ compress: 'auto', ...options });
 }
 
 /** Qué sensores tiene este móvil. Sin servicio nativo, ninguno. */

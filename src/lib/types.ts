@@ -124,6 +124,18 @@ export interface MonitorSettings {
    * para que lo borrado no vuelva a calcularse con el registro bruto.
    */
   contextSince: number;
+  /**
+   * Conservar sin caducidad el registro bruto, las lecturas de sensores y las
+   * noches con su contexto en el archivo histórico del móvil (ver
+   * `lib/historyArchive.ts`). Todo local. Activado por defecto.
+   */
+  keepHistory: boolean;
+  /**
+   * Registrar todos los sensores disponibles: agregados ligeros de cada
+   * sensor no sensible en las ventanas cortas de la postura. Necesita
+   * `keepHistory`. Activado por defecto.
+   */
+  allSensors: boolean;
 }
 
 /**

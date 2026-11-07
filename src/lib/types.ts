@@ -294,6 +294,7 @@ export interface ContextAlgo {
     dark: number | null;
     moves: number | null;
     flat: number | null;
+    litFlat?: number | null;
     alarmMatch: boolean | null;
   };
   /** Huecos de la misma noche que se descartaron y por qué. */

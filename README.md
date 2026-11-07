@@ -149,8 +149,7 @@ va al **registro bruto** (un evento por línea), que se cruza con cada hueco y s
 exporta en CSV o JSON desde Ajustes, junto al historial.
 
 **Postura del móvil** ([`SensorWatcher.java`](android/app/src/main/java/com/perfectrest/app/SensorWatcher.java)).
-No deja ningún sensor escuchando: con la pantalla apagada y dentro de la ventana
-nocturna, cada rearme del vigilante (**cada 10 minutos** de noche con este
+No deja ningún sensor escuchando: con la pantalla apagada, cada rearme del vigilante (**cada 10 minutos** de noche con este
 sensor activo en vez de 15, por encima de los 9 que Android deja entre dos
 alarmas en reposo; de día sigue a 15) y unos 45 s después de apagarse la
 pantalla —para no leer el móvil aún en la mano— abre el acelerómetro unos
@@ -166,6 +165,20 @@ al baño o un golpe en la mesa—; dos seguidas son un rato despierto: mueven el
 inicio hasta el último momento con el móvil encima y, si ocurren tras cuatro
 horas de sueño, marcan el despertar. Si el móvil no tiene acelerómetro, Ajustes
 lo dice y el sensor no registra nada.
+
+*Postura de día y luz.* Las lecturas ya no se limitan a la ventana nocturna: de
+día se hacen igual, con la pantalla apagada, pero espaciadas al menos 15
+minutos (de noche, 4), y sirven para distinguir el móvil quieto sobre una mesa
+mientras se está despierto del que duerme una siesta. Cuando una lectura sale
+**plano boca arriba** y el sensor de luz está activo, se anota también la luz de
+ese instante (`posture-lux`, en lux): plano y a oscuras es dormir; plano con luz
+clara (50 lux o más) es la mesa de una oficina, y esa lectura deja de contar como
+móvil dormido, mueve el inicio como cualquier luz encendida (`activityAt`), baja
+`flat` y sube `litFlat`, y una propuesta con más de un 30 % de lecturas planas a
+la luz no se da por quieta ni se acepta como siesta. Boca abajo el sensor de luz
+mira a la mesa y mide oscuridad siempre, así que ahí no se mide ni se usa: con el
+móvil boca abajo la comprobación no discrimina, y queda a la espera de datos
+reales para decidir si hace falta otra señal.
 
 *Sin calibrar.* Los umbrales (15° de inclinación, 0,35 m/s² de vaivén en plano,
 0,12 en inclinado, 70 % de lecturas planas para la quietud) son estimaciones

@@ -42,6 +42,13 @@ export type RawKind =
    * `POSTURE_*`). Una línea por lectura, cada pocos minutos.
    */
   | 'posture'
+  /**
+   * Lux medidos en el mismo instante que una lectura de postura «plano boca
+   * arriba» (v = lux). Dice si el móvil apoyado está a oscuras (dormir) o con
+   * luz (la mesa de una oficina). Boca abajo el sensor de luz mira a la mesa y
+   * siempre ve oscuridad, así que ahí no se mide.
+   */
+  | 'posture-lux'
   // --- Contexto del dispositivo ---------------------------------------------
   // Los escribe el muestreo ligero del servicio (`ContextSampler.java`) sólo
   // cuando cambia el valor, más una lectura de refresco cada pocas horas, y los
@@ -102,6 +109,8 @@ export interface RawEvent {
 export const LIGHT_DARK = 0;
 export const LIGHT_DIM = 1;
 export const LIGHT_BRIGHT = 2;
+/** Lux a partir de los cuales hay luz de verdad (el mismo umbral que `LUX_BRIGHT` del servicio). */
+export const LUX_BRIGHT = 50;
 
 /** Posturas que registra el servicio a partir de la gravedad y el vaivén del acelerómetro. */
 export const POSTURE_FLAT_UP = 0;
@@ -120,6 +129,7 @@ export const SENSOR_OF_KIND: Partial<Record<RawKind, SensorId>> = {
   audio: 'audio',
   alarm: 'alarm',
   posture: 'posture',
+  'posture-lux': 'light',
 };
 
 /** Normaliza lo que devuelve el plugin: descarta basura y ordena por hora. */
@@ -160,6 +170,12 @@ export interface GapEvidence {
    * plano y quieto; null sin lecturas (sensor apagado, ausente o sin datos).
    */
   flat: number | null;
+  /**
+   * Fracción (0-1) de las lecturas «plano» que se hicieron con luz clara, entre
+   * las que traen lux; null si ninguna los trae. Plano y con luz es una mesa,
+   * no una cama.
+   */
+  litFlat: number | null;
   /** Hora de la alarma que sonó cerca del final, si la hubo. */
   alarmAt: number | null;
   /** ¿Hay alarma programada y cae cerca del final de la noche? null sin datos de alarma. */
@@ -174,6 +190,7 @@ export const NO_EVIDENCE: GapEvidence = {
   dark: null,
   moves: null,
   flat: null,
+  litFlat: null,
   alarmAt: null,
   alarmMatch: null,
   sensors: [],
@@ -250,6 +267,13 @@ function episodes(events: RawEvent[], from: number, to: number, enabled: SensorI
       case 'posture':
         if (has('posture') && e.v === POSTURE_CARRIED)
           spans.push({ from: e.at, to: e.at + POSTURE_SPAN_MS, weight: POSTURE_WEIGHT, light: false });
+        break;
+      case 'posture-lux':
+        // Plano pero con luz: sobre una mesa a la vista, no en una cama a oscuras.
+        // Cada lectura es una luz clara de unos minutos; dos seguidas cuentan como
+        // un rato de luz encendida y mueven el inicio como cualquier luz que se apaga.
+        if (has('posture') && has('light') && (e.v ?? 0) >= LUX_BRIGHT)
+          spans.push({ from: e.at, to: e.at + POSTURE_SPAN_MS, weight: POSTURE_WEIGHT, light: true });
         break;
       case 'light':
         if (!has('light')) break;
@@ -372,15 +396,36 @@ export function gatherEvidence(
     : null;
 
   // Postura: cuánto del sueño estimado estuvo el móvil plano y quieto.
+  // Un «plano» con luz clara no cuenta como móvil dormido: es una mesa.
   let flat: number | null = null;
+  let litFlat: number | null = null;
   if (enabled.includes('posture')) {
     const readings = events.filter(
       (e) => e.kind === 'posture' && e.at >= sleepFrom && e.at <= wakeBound,
     );
     if (readings.length) {
-      flat =
-        readings.filter((e) => e.v === POSTURE_FLAT_UP || e.v === POSTURE_FLAT_DOWN).length /
-        readings.length;
+      const lux = enabled.includes('light')
+        ? events.filter((e) => e.kind === 'posture-lux' && e.at >= sleepFrom - LUX_PAIR_MS && e.at <= wakeBound + LUX_PAIR_MS)
+        : [];
+      const luxOf = (at: number) => lux.find((l) => Math.abs(l.at - at) <= LUX_PAIR_MS);
+      let flatCount = 0;
+      let measured = 0;
+      let lit = 0;
+      for (const r of readings) {
+        if (r.v !== POSTURE_FLAT_UP && r.v !== POSTURE_FLAT_DOWN) continue;
+        // Sólo boca arriba la luz dice algo: boca abajo el sensor mira a la mesa.
+        const l = r.v === POSTURE_FLAT_UP ? luxOf(r.at) : undefined;
+        if (l) {
+          measured++;
+          if ((l.v ?? 0) >= LUX_BRIGHT) {
+            lit++;
+            continue;
+          }
+        }
+        flatCount++;
+      }
+      flat = flatCount / readings.length;
+      litFlat = measured ? lit / measured : null;
     }
   }
 
@@ -409,6 +454,7 @@ export function gatherEvidence(
     dark,
     moves,
     flat,
+    litFlat,
     alarmAt,
     alarmMatch,
     sensors: [...used],
@@ -428,9 +474,16 @@ export function gatherEvidence(
 export function quietEvidence(ev: GapEvidence | null | undefined): boolean {
   if (!ev) return false;
   if (ev.moves !== null && ev.moves > 0) return false;
+  // Plano pero a plena luz: una mesa a la vista, no una cama.
+  if (ev.litFlat !== null && ev.litFlat > LIT_FLAT_MAX_SHARE) return false;
   if (ev.flat !== null && ev.flat >= QUIET_FLAT_SHARE) return true;
   return ev.dark !== null && ev.dark >= QUIET_DARK_SHARE && ev.moves === 0;
 }
+
+/** Si más de esta parte de las lecturas planas tuvo luz clara, el móvil no estaba durmiendo a oscuras. */
+export const LIT_FLAT_MAX_SHARE = 0.3;
+/** Una lectura de lux va con la postura que se hizo en la misma ventana: segundos de diferencia. */
+const LUX_PAIR_MS = 30_000;
 
 /** Fracción mínima de lecturas con el móvil plano para dar por quieta la noche. */
 const QUIET_FLAT_SHARE = 0.7;

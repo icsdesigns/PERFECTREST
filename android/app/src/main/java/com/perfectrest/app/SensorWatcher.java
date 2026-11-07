@@ -52,14 +52,22 @@ import java.util.Set;
  *              con cada rearme del vigilante; no hay nada que escuchar.
  *   audio      si suena algo, consultado en esos mismos momentos.
  *   posture    postura del móvil con el acelerómetro, en lecturas puntuales: con
- *              la pantalla apagada y de noche, en cada rearme del vigilante
- *              (cada diez minutos con este sensor) y unos segundos después de
+ *              la pantalla apagada, en cada rearme del vigilante (cada diez
+ *              minutos de noche con este sensor) y unos segundos después de
  *              apagarse la pantalla, se escucha el acelerómetro
  *              unos dos segundos y se anota si el móvil está plano y quieto
  *              (sobre la mesa o la cama, boca arriba o abajo), inclinado y
  *              quieto (un soporte), o en el bolsillo o la mano (inclinado y con
  *              vaivén). Entre lecturas no hay nada registrado, y durante la
  *              lectura sólo un wakelock de unos segundos que se suelta solo.
+ *              De día las lecturas se espacian más ({@link #POSTURE_DAY_SPACING_MS}):
+ *              sirven para distinguir el móvil quieto sobre una mesa del que
+ *              duerme una siesta.
+ *   posture-lux  cuando la lectura sale plano y boca arriba, y con el sensor de
+ *              luz activo, se anota también la luz de ese momento: el móvil
+ *              plano en la oscuridad es dormir; plano con luz, la mesa de una
+ *              oficina. Boca abajo el sensor (que está en la pantalla) siempre
+ *              ve oscuridad, y no se mide.
  */
 final class SensorWatcher {
 
@@ -86,6 +94,11 @@ final class SensorWatcher {
     private static final int POSTURE_MIN_SAMPLES = 8;
     /** Dos lecturas más cerca que esto se funden en una: un SCREEN_OFF y el vigilante no suman dos. */
     private static final long POSTURE_MIN_SPACING_MS = 4 * 60_000L;
+    /**
+     * De día, entre lecturas, al menos esto: sólo hace falta saber si el móvil
+     * estuvo quieto y a oscuras, no seguirlo minuto a minuto.
+     */
+    static final long POSTURE_DAY_SPACING_MS = 15 * 60_000L;
     /** El wakelock de la lectura se suelta solo aunque algo falle. */
     private static final long POSTURE_WAKELOCK_MS = 6_000L;
     /**
@@ -133,6 +146,9 @@ final class SensorWatcher {
     private SensorEventListener postureListener;
     private PowerManager.WakeLock postureLock;
     private long lastPostureAt = 0L;
+    /** Escucha de la luz durante la ventana de postura, sin la entrega diferida de la normal. */
+    private SensorEventListener lightProbe;
+    private float probeLux = Float.NaN;
     private final float[] posX = new float[POSTURE_MAX_SAMPLES];
     private final float[] posY = new float[POSTURE_MAX_SAMPLES];
     private final float[] posZ = new float[POSTURE_MAX_SAMPLES];
@@ -494,16 +510,19 @@ final class SensorWatcher {
      */
     private void samplePosture(long now) {
         if (sensors == null || postureListener != null || extraListener != null) return;
-        if (now - lastPostureAt < POSTURE_MIN_SPACING_MS) return;
         // Con la pantalla encendida el móvil está en uso, no en reposo.
         PowerManager power = (PowerManager) context.getSystemService(Context.POWER_SERVICE);
         if (power == null || power.isInteractive()) return;
-        // Sólo importa la noche: fuera de ella las lecturas llenarían el registro bruto.
-        if (!SleepMonitorService.inNightWindow(context, now)) return;
+        // De noche, una lectura cada pocos minutos; de día, más espaciadas, para
+        // no llenar el registro bruto ni gastar batería.
+        boolean night = SleepMonitorService.inNightWindow(context, now);
+        if (now - lastPostureAt < postureSpacingMs(night)) return;
 
-        Sensor accel = active.contains(POSTURE) || allSensors
+        // De día sólo la postura de la detección: el resto de sensores (la
+        // ráfaga de «todos los sensores») sigue siendo cosa de la noche.
+        Sensor accel = (active.contains(POSTURE) || (allSensors && night))
             ? sensors.getDefaultSensor(Sensor.TYPE_ACCELEROMETER) : null;
-        boolean extras = allSensors && HistoryArchive.enabled(context) && batteryAllows();
+        boolean extras = night && allSensors && HistoryArchive.enabled(context) && batteryAllows();
         if (accel == null && !extras) return;
 
         // Sin esto el procesador puede dormirse a mitad de lectura. Se suelta
@@ -546,11 +565,58 @@ final class SensorWatcher {
             releasePostureLock();
             return;
         }
+        if (ok) startLightProbe();
         if (!ok) {
             // Sin acelerómetro la ventana sigue por los demás sensores.
             postureListener = null;
         }
         postureHandler.postDelayed(readingTimeout, POSTURE_WINDOW_MS);
+    }
+
+    /** Espaciado mínimo entre lecturas de postura: más corto de noche que de día. */
+    static long postureSpacingMs(boolean night) {
+        return night ? POSTURE_MIN_SPACING_MS : POSTURE_DAY_SPACING_MS;
+    }
+
+    /**
+     * Escucha la luz durante la ventana de postura. La del vigilante de luz llega
+     * en lotes de hasta diez minutos y sólo anota cambios de nivel; aquí hace
+     * falta el valor de ahora mismo, y el sensor de luz, que informa al
+     * registrarse, lo da al instante.
+     */
+    private void startLightProbe() {
+        probeLux = Float.NaN;
+        if (sensors == null || lightProbe != null) return;
+        if (!active.contains(LIGHT) && !allSensors) return;
+        try {
+            Sensor light = sensors.getDefaultSensor(Sensor.TYPE_LIGHT);
+            if (light == null) return;
+            lightProbe = new SensorEventListener() {
+                @Override
+                public void onSensorChanged(SensorEvent event) {
+                    if (event.values != null && event.values.length > 0) probeLux = event.values[0];
+                }
+
+                @Override
+                public void onAccuracyChanged(Sensor sensor, int accuracy) {}
+            };
+            if (!sensors.registerListener(lightProbe, light, SensorManager.SENSOR_DELAY_UI)) {
+                lightProbe = null;
+            }
+        } catch (RuntimeException e) {
+            lightProbe = null;
+        }
+    }
+
+    /** Cierra la escucha de luz de la ventana y devuelve el último valor, o NaN. */
+    private float endLightProbe() {
+        if (lightProbe != null) {
+            if (sensors != null) sensors.unregisterListener(lightProbe);
+            lightProbe = null;
+        }
+        float lux = probeLux;
+        probeLux = Float.NaN;
+        return lux;
     }
 
     /** ¿Hay batería para leer más sensores? Cargando, siempre. */
@@ -642,6 +708,7 @@ final class SensorWatcher {
     private void endPostureReading(boolean record) {
         postureHandler.removeCallbacks(readingTimeout);
         SensorCatalog.Agg accel = null;
+        final float lux = endLightProbe();
         if (postureListener != null) {
             if (sensors != null) sensors.unregisterListener(postureListener);
             postureListener = null;
@@ -659,7 +726,12 @@ final class SensorWatcher {
                 if (active.contains(POSTURE)) {
                     int posture = classifyPosture(posX, posY, posZ, posN);
                     if (posture != POSTURE_INVALID) {
-                        RawEventLog.addSensor(context, System.currentTimeMillis(), "posture", posture);
+                        long at = System.currentTimeMillis();
+                        RawEventLog.addSensor(context, at, "posture", posture);
+                        // Boca arriba: ¿en la oscuridad (dormir) o con luz (una mesa de oficina)?
+                        if (luxTellsAnything(posture) && !Float.isNaN(lux)) {
+                            RawEventLog.addSensor(context, at, "posture-lux", Math.round(lux));
+                        }
                     }
                 }
             }
@@ -695,6 +767,15 @@ final class SensorWatcher {
      *   inclinado y casi sin vaivén                         → inclinado quieto (soporte, mano firme)
      *   con vaivén (plano: mucho; inclinado: poco)          → en bolsillo o mano
      */
+    /**
+     * ¿Dice algo la luz con esta postura? El sensor de luz está en la cara de la
+     * pantalla: boca abajo siempre mide oscuridad, esté el móvil en una cama o
+     * en una oficina, así que sólo cuenta boca arriba.
+     */
+    static boolean luxTellsAnything(int posture) {
+        return posture == POSTURE_FLAT_UP;
+    }
+
     static int classifyPosture(float[] x, float[] y, float[] z, int n) {
         if (n < POSTURE_MIN_SAMPLES) return POSTURE_INVALID;
         double mx = 0, my = 0, mz = 0;

@@ -663,6 +663,64 @@ console.log('\n--- Precisión: postura del móvil ---');
   assert('un rato con el móvil en la mano a las 02:00 mueve el inicio a cuando lo soltó',
     restless.results.length === 1 && clock(restless.results[0].session.start) === '02:15',
     restless.results.map((r) => clock(r.session.start)));
+
+  // --- La luz confirma que el móvil plano está a oscuras --------------------
+  /** Lecturas planas cada 10 min, cada una con su medida de lux. */
+  const flatWithLux = (from: string, to: string, lux: number): RawEvent[] => {
+    const out: RawEvent[] = [];
+    for (let t = at(from); t <= at(to); t += 10 * MINUTE) {
+      out.push({ at: t, kind: 'posture', v: POSTURE_FLAT_UP }, { at: t + 2_000, kind: 'posture-lux', v: lux });
+    }
+    return out;
+  };
+  const luxFrom = at('2026-09-22T00:00:00');
+  const luxTo = at('2026-09-22T09:00:00');
+  const darkRoom = gatherEvidence(flatWithLux('2026-09-22T00:00:00', '2026-09-22T08:50:00', 1), luxFrom, luxTo, ['posture', 'light']);
+  assert('plano y a oscuras: sigue siendo quietud confirmada',
+    darkRoom.flat === 1 && darkRoom.litFlat === 0 && quietEvidence(darkRoom), [darkRoom.flat, darkRoom.litFlat]);
+  const office = gatherEvidence(flatWithLux('2026-09-22T00:00:00', '2026-09-22T08:50:00', 300), luxFrom, luxTo, ['posture', 'light']);
+  assert('plano pero con luz clara: es una mesa, no cuenta como dormido',
+    office.flat === 0 && office.litFlat === 1 && !quietEvidence(office), [office.flat, office.litFlat]);
+  // Boca abajo la luz siempre sale oscura aunque haya una oficina entera encendida.
+  const faceDown: RawEvent[] = [];
+  for (let t = luxFrom; t <= luxTo - 10 * MINUTE; t += 10 * MINUTE)
+    faceDown.push({ at: t, kind: 'posture', v: POSTURE_FLAT_DOWN }, { at: t + 2_000, kind: 'posture-lux', v: 400 });
+  const downEv = gatherEvidence(faceDown, luxFrom, luxTo, ['posture', 'light']);
+  assert('boca abajo la luz no se usa: sigue siendo quietud',
+    downEv.flat === 1 && downEv.litFlat === null && quietEvidence(downEv), [downEv.flat, downEv.litFlat]);
+  const noLuxSensor = gatherEvidence(flatWithLux('2026-09-22T00:00:00', '2026-09-22T08:50:00', 300), luxFrom, luxTo, ['posture']);
+  assert('con el sensor de luz apagado no se usa la luz: todo sigue como antes',
+    noLuxSensor.flat === 1 && noLuxSensor.litFlat === null && quietEvidence(noLuxSensor), [noLuxSensor.flat, noLuxSensor.litFlat]);
+  const noLuxReading = gatherEvidence(readings('2026-09-22T00:00:00', '2026-09-22T08:50:00', POSTURE_FLAT_UP), luxFrom, luxTo, ['posture', 'light']);
+  assert('lecturas planas sin lux (versión anterior del servicio) siguen valiendo',
+    noLuxReading.flat === 1 && noLuxReading.litFlat === null && quietEvidence(noLuxReading));
+  // Se encendió la luz a las 02:00 con el móvil plano en la mesa: seguía despierto.
+  const lampOn = gatherEvidence(
+    [
+      ...flatWithLux('2026-09-22T00:00:00', '2026-09-22T01:50:00', 1),
+      ...flatWithLux('2026-09-22T02:00:00', '2026-09-22T02:40:00', 120),
+      ...flatWithLux('2026-09-22T02:50:00', '2026-09-22T08:50:00', 1),
+    ],
+    luxFrom, luxTo, ['posture', 'light'],
+  );
+  assert('un rato plano con luz encendida mueve el inicio a cuando se apagó',
+    lampOn.activityAt !== null && clock(lampOn.activityAt) >= '02:40' && clock(lampOn.activityAt) <= '02:50',
+    lampOn.activityAt && clock(lampOn.activityAt));
+
+  // Una siesta de día: plano a oscuras se acepta; plano a la luz de una oficina, no.
+  const napEvents = (lux: number): RawEvent[] => [
+    { at: at('2026-09-23T13:30:00'), kind: 'light', v: LIGHT_DARK },
+    { at: at('2026-09-23T13:40:00'), kind: 'proximity', v: 1 },
+    ...flatWithLux('2026-09-23T14:00:00', '2026-09-23T18:30:00', lux),
+  ];
+  const napGaps = [gap('2026-09-22T23:30:00', '2026-09-23T07:30:00'), gap('2026-09-23T14:00:00', '2026-09-23T18:40:00')];
+  const dayDark = evaluateGaps(napGaps, on('light', 'proximity', 'posture'), { habit, events: napEvents(1) });
+  assert('de día, plano y a oscuras: se propone como siesta',
+    dayDark.results.length === 2 && !!dayDark.results[1].session.nap,
+    dayDark.results.map((x) => `${clock(x.session.start)} ${x.session.nap}`));
+  const dayOffice = evaluateGaps(napGaps, on('light', 'proximity', 'posture'), { habit, events: napEvents(400) });
+  assert('de día, plano a plena luz (mesa de oficina): no es una siesta',
+    dayOffice.results.length === 1, dayOffice.results.map((x) => `${clock(x.session.start)} ${x.session.nap}`));
 }
 
 // --- No deducir el sueño por la hora ---------------------------------------

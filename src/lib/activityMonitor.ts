@@ -2,7 +2,7 @@ import { App } from '@capacitor/app';
 import { Capacitor } from '@capacitor/core';
 import { HOUR, MINUTE, formatDuration, inWindow, parseTime } from './time';
 import { minuteDiff, type SleepHabit } from './habit';
-import { gatherEvidence, lastSustainedUse, quietEvidence, type GapEvidence, type RawEvent } from './rawEvents';
+import { gatherEvidence, lastSustainedUse, LIT_FLAT_MAX_SHARE, quietEvidence, type GapEvidence, type RawEvent } from './rawEvents';
 import { activeSensors } from './sensors';
 import { loadRaw, saveRaw } from './storage';
 import {
@@ -1048,6 +1048,8 @@ function napEvidence(r: DetectionResult): boolean {
   const independent = (['screen', 'charger', 'dnd'] as TriggerId[]).filter((id) => triggers.has(id));
   if (independent.length >= 2) return true;
   const ev = r.evidence;
+  // Plano a plena luz es una mesa a la vista: ni siesta ni nada.
+  if (ev && ev.litFlat !== null && ev.litFlat > LIT_FLAT_MAX_SHARE) return false;
   return !!ev && ev.dark !== null && ev.dark >= 0.8 && (ev.moves ?? 0) === 0 && ev.sensors.length > 0;
 }
 

@@ -81,6 +81,23 @@ public class PostureTest {
     }
 
     @Test
+    public void deDiaLasLecturasSeEspacianMasQueDeNoche() {
+        assertEquals(4 * 60_000L, SensorWatcher.postureSpacingMs(true));
+        assertEquals(15 * 60_000L, SensorWatcher.postureSpacingMs(false));
+        assertTrue(SensorWatcher.postureSpacingMs(false) > SensorWatcher.postureSpacingMs(true));
+    }
+
+    @Test
+    public void laLuzSoloDiceAlgoBocaArriba() {
+        assertTrue(SensorWatcher.luxTellsAnything(SensorWatcher.POSTURE_FLAT_UP));
+        // Boca abajo el sensor de luz mira a la mesa: oscuro en cualquier sitio.
+        assertFalse(SensorWatcher.luxTellsAnything(SensorWatcher.POSTURE_FLAT_DOWN));
+        assertFalse(SensorWatcher.luxTellsAnything(SensorWatcher.POSTURE_CARRIED));
+        assertFalse(SensorWatcher.luxTellsAnything(SensorWatcher.POSTURE_TILTED));
+        assertFalse(SensorWatcher.luxTellsAnything(SensorWatcher.POSTURE_INVALID));
+    }
+
+    @Test
     public void ventanaNocturnaQueCruzaMedianoche() {
         int start = 21 * 60 + 30;
         int end = 11 * 60;

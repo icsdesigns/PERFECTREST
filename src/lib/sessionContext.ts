@@ -606,6 +606,7 @@ export function buildAlgo(input: AlgoInput): ContextAlgo {
       dark: ev.dark === null ? null : Math.round(ev.dark * 100) / 100,
       moves: ev.moves,
       flat: ev.flat === null ? null : Math.round(ev.flat * 100) / 100,
+      litFlat: ev.litFlat === null ? null : Math.round(ev.litFlat * 100) / 100,
       alarmMatch: ev.alarmMatch,
     };
   }

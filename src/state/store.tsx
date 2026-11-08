@@ -102,6 +102,7 @@ type Action =
   | { type: 'setContexts'; contexts: Record<string, SessionContext> }
   /** Borra todos los contextos guardados; `at` es desde cuándo vuelve a recogerse. */
   | { type: 'clearContexts'; at: number }
+  | { type: 'clearSessions' }
   /** Pone la hora habitual como inicio de una propuesta, a petición del usuario. */
   | { type: 'applyHabitStart'; id: string; start: number }
   | { type: 'reset' };
@@ -218,6 +219,11 @@ export function reducer(state: AppState, action: Action): AppState {
         sessions: stripContexts(state.sessions),
         pendingSessions: stripContexts(state.pendingSessions),
       };
+
+    case 'clearSessions':
+      // Vacía el historial de noches (confirmadas y pendientes). El hábito
+      // aprendido y los ajustes no se tocan: son configuración, no historial.
+      return { ...state, sessions: [], pendingSessions: [] };
 
     case 'applyHabitStart': {
       // Tocarla la revisa: deja de ser una deducción. Sigue sin confirmar y

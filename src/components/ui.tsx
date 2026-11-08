@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react';
+import { useId, useState, type ReactNode } from 'react';
 import './ui.css';
 
 export function Card({
@@ -9,6 +9,8 @@ export function Card({
   accent,
   flush,
   className = '',
+  collapsible,
+  defaultOpen = false,
 }: {
   title?: ReactNode;
   sub?: ReactNode;
@@ -17,7 +19,41 @@ export function Card({
   accent?: boolean;
   flush?: boolean;
   className?: string;
+  /** Cabecera pulsable que pliega y despliega el contenido. */
+  collapsible?: boolean;
+  /** Sólo con `collapsible`: si arranca desplegada. Por defecto, plegada. */
+  defaultOpen?: boolean;
 }) {
+  const [open, setOpen] = useState(defaultOpen);
+  const bodyId = useId();
+
+  if (collapsible) {
+    return (
+      <section
+        className={`card card--collapsible ${open ? 'is-open' : ''} ${accent ? 'card--accent' : ''} ${className}`}
+      >
+        <button
+          type="button"
+          className="card__toggle"
+          aria-expanded={open}
+          aria-controls={bodyId}
+          onClick={() => setOpen((o) => !o)}
+        >
+          <span className="card__toggle-text">
+            {title && <h2 className="card__title">{title}</h2>}
+            {sub && <span className="card__sub">{sub}</span>}
+          </span>
+          {action}
+          <span className="card__chevron" aria-hidden="true" />
+        </button>
+        {/* `hidden` y no desmontar: conserva el estado y los sondeos de los hijos. */}
+        <div id={bodyId} className="card__body" hidden={!open}>
+          {children}
+        </div>
+      </section>
+    );
+  }
+
   return (
     <section
       className={`card ${accent ? 'card--accent' : ''} ${flush ? 'card--flush' : ''} ${className}`}

@@ -68,7 +68,10 @@ check('Ajustes', wrap(<SettingsScreen />), [
   // La privacidad del contexto: el interruptor y el borrado tienen que estar a la vista.
   'Guardar contexto del dispositivo con cada noche',
   'Nunca ubicación',
-  'Borrar contextos guardados',
+  'Borrar contextos de las noches',
+  // Reset de historiales: pieza a pieza y de golpe.
+  'Borrar todos los historiales',
+  'Borrar noches registradas',
   // Exportación única y archivo permanente: los controles tienen que estar a la vista.
   'Exportar todo',
   'Exportar avanzado',

@@ -32,15 +32,14 @@ import {
   describeEvent,
   eventTone,
   pushEvents,
+  readLog,
   summarizeLog,
 } from '../lib/triggerLog';
 import { TRIGGERS, TRIGGER_SHORT, triggerEnabled } from '../lib/triggers';
 import { HOUR, formatDuration, relativeDayLabel } from '../lib/time';
-import { MAX_CONTEXTS } from '../lib/sessionContext';
 import { exportRawEvents, exportSessions, type ExportFormat } from '../lib/exportSessions';
 import { exportEverything } from '../lib/exportAll';
 import {
-  ARCHIVE_ESTIMATE_MB_PER_MONTH,
   formatArchiveRange,
   formatBytes,
 } from '../lib/historyArchive';
@@ -51,16 +50,11 @@ import { APP_VERSION } from '../lib/updater';
 import type { SensorId, TriggerEvent, TriggerId } from '../lib/types';
 
 export function SettingsScreen() {
-  const { state, patch, dispatch, clearContexts, setSaveContext } = useStore();
+  const { state, patch, setSaveContext } = useStore();
   const { monitor, theme } = state;
   const [permission, setPermission] = useState<PermissionState>('prompt');
-  const [confirmReset, setConfirmReset] = useState(false);
-  const [confirmClearContexts, setConfirmClearContexts] = useState(false);
-  const [confirmClearRaw, setConfirmClearRaw] = useState(false);
   const [exportError, setExportError] = useState(false);
   const [exporting, setExporting] = useState(false);
-  const [confirmClearArchive, setConfirmClearArchive] = useState(false);
-  const [archiveInfo, setArchiveInfo] = useState<ArchiveInfo | null>(null);
   const [service, setService] = useState<MonitorStatus>({
     running: false,
     enabled: false,
@@ -95,18 +89,6 @@ export function SettingsScreen() {
       })
       .finally(() => setExporting(false));
   };
-
-  // Tamaño y rango del archivo: sólo metadatos, nunca los datos.
-  useEffect(() => {
-    if (!backgroundReady) return;
-    let alive = true;
-    void readArchiveInfo().then((r) => {
-      if (alive && r) setArchiveInfo(r.info);
-    });
-    return () => {
-      alive = false;
-    };
-  }, [backgroundReady, monitor.keepHistory, confirmClearArchive]);
 
   const doExport = (format: ExportFormat) => {
     setExportError(false);
@@ -174,7 +156,7 @@ export function SettingsScreen() {
 
   return (
     <>
-      <Card title="Apariencia">
+      <Card title="Apariencia" collapsible>
         <Segmented
           value={theme}
           label="Tema"
@@ -199,6 +181,7 @@ export function SettingsScreen() {
       />
 
       <Card
+        collapsible
         title="Detección automática del sueño"
         sub="Se deduce del tiempo que el dispositivo pasa sin usarse. Elige abajo qué señales quieres que la disparen."
         action={<Pill tone={monitor.enabled ? 'mint' : 'muted'}>{monitor.enabled ? 'Activa' : 'Apagada'}</Pill>}
@@ -325,6 +308,7 @@ export function SettingsScreen() {
 
       {monitor.enabled && (
         <Card
+          collapsible
           title="Disparadores"
           sub="Qué señales pueden marcar el principio y el final de una noche. Cuando dos coinciden sobre el mismo hueco, la sesión se propone con más confianza."
         >
@@ -358,6 +342,7 @@ export function SettingsScreen() {
 
       {monitor.enabled && (
         <Card
+          collapsible
           title="Sensores opcionales"
           sub="Ayudan a acertar cuándo te dormiste y cuándo te despertaste: dejar el móvil no es dormirse, y entre una cosa y otra suele pasar una hora o más. Vienen apagados, gastan muy poca batería y ninguno usa el micrófono ni la cámara."
         >
@@ -414,7 +399,7 @@ export function SettingsScreen() {
 
       <UpdateCard />
 
-      <Card title="Tus datos" sub="Todo se guarda solo en este dispositivo. No hay cuenta ni servidor.">
+      <Card collapsible title="Tus datos" sub="Todo se guarda solo en este dispositivo. No hay cuenta ni servidor.">
         <div className="row">
           <div>
             <div className="row__label">Noches registradas</div>
@@ -490,56 +475,6 @@ export function SettingsScreen() {
             hint="En las lecturas cortas de la noche (unos 2,5 s cada pocos minutos, con la pantalla apagada) guarda también un resumen —media, mínimo, máximo y desviación— de cada sensor que tenga el móvil: acelerómetro, giroscopio, brújula, presión, temperatura, humedad, luz y demás. Sin ritmo cardíaco ni sensores que pidan permisos sensibles. No usa batería apreciable: reutiliza la lectura de la postura y se omite con menos de un 15 % sin cargar. Necesita conservar el histórico."
           />
         </div>
-        <>
-            <div className="row">
-              <div>
-                <div className="row__label">Archivo histórico</div>
-                <div className="row__hint">
-                  {archiveInfo && archiveInfo.bytes > 0
-                    ? `${formatArchiveRange(archiveInfo.from || archiveInfo.readingsFrom, archiveInfo.to || archiveInfo.readingsTo) ?? 'Sin eventos aún'} · ${archiveInfo.events} eventos, ${archiveInfo.readings} lecturas de sensores`
-                    : 'Vacío por ahora'}
-                </div>
-              </div>
-              <Pill tone="primary">{formatBytes(archiveInfo?.bytes ?? 0)}</Pill>
-            </div>
-            <p style={{ fontSize: '0.76rem', color: 'var(--text-muted)', marginTop: 'var(--sp-2)', lineHeight: 1.55 }}>
-              Crece unos {ARCHIVE_ESTIMATE_MB_PER_MONTH.closedMonth.toString().replace('.', ',')} MB por mes
-              ya cerrado (el mes en curso, hasta ~{ARCHIVE_ESTIMATE_MB_PER_MONTH.openMonth.toString().replace('.', ',')} MB
-              sin comprimir). Es una estimación: aquí ves el tamaño real.
-            </p>
-            {confirmClearArchive ? (
-              <div className="pending__actions">
-                <button className="btn btn--ghost" onClick={() => setConfirmClearArchive(false)}>
-                  Cancelar
-                </button>
-                <button
-                  className="btn btn--danger"
-                  onClick={() => {
-                    void clearArchive().then(() => setArchiveInfo(null));
-                    setConfirmClearArchive(false);
-                  }}
-                >
-                  Sí, borrar el histórico
-                </button>
-              </div>
-            ) : (
-              <button
-                className="btn btn--ghost btn--full"
-                style={{ marginTop: 'var(--sp-2)' }}
-                disabled={!backgroundReady}
-                onClick={() => setConfirmClearArchive(true)}
-              >
-                Borrar archivo histórico
-              </button>
-            )}
-            {confirmClearArchive && (
-              <p style={{ fontSize: '0.76rem', color: 'var(--amber)', marginTop: 'var(--sp-2)', lineHeight: 1.55 }}>
-                Se borra para siempre todo el histórico guardado, incluidas las copias de tus noches
-                con su contexto. Tus noches en la app no se tocan.
-              </p>
-            )}
-        </>
-
         <div style={{ marginTop: 'var(--sp-3)' }}>
           <Toggle
             checked={monitor.saveContext}
@@ -548,92 +483,9 @@ export function SettingsScreen() {
             hint="Para afinar la detección, cada noche guarda un resumen de lo que hizo el móvil entre media hora antes de dormirte y media hora después de despertar: cuántas veces se encendió la pantalla, batería y carga, tipo de red (no su nombre), modo avión, timbre, «no molestar», ahorro de energía, sensores y cómo se detectó la noche, además del modelo de móvil y la versión de Android y de la app. Son recuentos, mínimos, máximos y porcentajes. Nunca ubicación, nombres de redes o de dispositivos Bluetooth, contenido de notificaciones, nombres de apps ni identificadores. Todo se queda en este móvil y sólo sale si tú lo exportas."
           />
         </div>
-        <div className="row">
-          <div>
-            <div className="row__label">Noches con contexto</div>
-          </div>
-          <Pill tone="primary">{state.sessions.filter((s) => s.context).length}</Pill>
-        </div>
-        <p style={{ fontSize: '0.76rem', color: 'var(--text-muted)', marginTop: 'var(--sp-2)', lineHeight: 1.55 }}>
-          La app muestra el contexto de las {MAX_CONTEXTS} noches más recientes (menos de un año);
-          las anteriores lo pierden aquí pero, con el histórico activado, siguen con su contexto en
-          el archivo y en «Exportar todo».
-        </p>
-        {confirmClearContexts ? (
-          <div className="pending__actions">
-            <button className="btn btn--ghost" onClick={() => setConfirmClearContexts(false)}>
-              Cancelar
-            </button>
-            <button
-              className="btn btn--danger"
-              onClick={() => {
-                clearContexts();
-                setConfirmClearContexts(false);
-              }}
-            >
-              Sí, borrar contextos
-            </button>
-          </div>
-        ) : (
-          <button
-            className="btn btn--ghost btn--full"
-            style={{ marginTop: 'var(--sp-2)' }}
-            disabled={!state.sessions.some((s) => s.context) && !state.pendingSessions.some((s) => s.context)}
-            onClick={() => setConfirmClearContexts(true)}
-          >
-            Borrar contextos guardados
-          </button>
-        )}
-        {backgroundReady &&
-          (confirmClearRaw ? (
-            <div className="pending__actions">
-              <button className="btn btn--ghost" onClick={() => setConfirmClearRaw(false)}>
-                Cancelar
-              </button>
-              <button
-                className="btn btn--danger"
-                onClick={() => {
-                  void clearRawEvents();
-                  setConfirmClearRaw(false);
-                }}
-              >
-                Sí, borrar el registro
-              </button>
-            </div>
-          ) : (
-            <button
-              className="btn btn--ghost btn--full"
-              style={{ marginTop: 'var(--sp-2)' }}
-              onClick={() => setConfirmClearRaw(true)}
-            >
-              Borrar registro bruto
-            </button>
-          ))}
-        {confirmReset ? (
-          <div className="pending__actions">
-            <button className="btn btn--ghost" onClick={() => setConfirmReset(false)}>
-              Cancelar
-            </button>
-            <button
-              className="btn btn--danger"
-              onClick={() => {
-                dispatch({ type: 'reset' });
-                setConfirmReset(false);
-              }}
-            >
-              Sí, borrar todo
-            </button>
-          </div>
-        ) : (
-          <button
-            className="btn btn--ghost btn--full"
-            style={{ marginTop: 'var(--sp-3)' }}
-            onClick={() => setConfirmReset(true)}
-          >
-            Restablecer la aplicación
-          </button>
-        )}
       </Card>
+
+      <HistoryCard backgroundReady={backgroundReady} />
 
       <p style={{ fontSize: '0.72rem', color: 'var(--text-faint)', textAlign: 'center', lineHeight: 1.6 }}>
         PerfectRest · Las estimaciones de ciclos son orientativas y no sustituyen el criterio
@@ -690,6 +542,7 @@ function TriggerLogCard({ backgroundReady }: { backgroundReady: boolean }) {
 
   return (
     <Card
+      collapsible
       title="Registro de detección"
       sub="Qué señales han llegado y qué se ha hecho con cada una. Es donde mirar cuando no se detecta nada."
       action={
@@ -915,6 +768,7 @@ function PermissionsCard({
 
   return (
     <Card
+      collapsible
       title="Permisos y estado de la detección"
       sub="Todo lo que la detección necesita del sistema. Si algo falta, no falla con un error: simplemente deja de registrar noches."
       action={
@@ -997,7 +851,7 @@ function UpdateCard() {
 
   if (!update.supported) {
     return (
-      <Card title="Versión" sub="La actualización automática solo funciona en la app instalada.">
+      <Card collapsible title="Versión" sub="La actualización automática solo funciona en la app instalada.">
         <div className="row">
           <div className="row__label">Versión instalada</div>
           <Pill tone="muted">{update.installed || APP_VERSION}</Pill>
@@ -1019,6 +873,7 @@ function UpdateCard() {
 
   return (
     <Card
+      collapsible
       title="Actualizaciones"
       sub="Se publican como releases de GitHub y se comprueban al abrir la app."
       action={<Pill tone={status.tone}>{status.text}</Pill>}
@@ -1052,6 +907,234 @@ function UpdateCard() {
       </div>
 
       {update.available && <UpdateBanner update={update} />}
+    </Card>
+  );
+}
+
+/**
+ * Historiales.
+ *
+ * Reúne en un solo sitio todo lo que la app acumula con el tiempo y permite
+ * vaciarlo pieza a pieza o de golpe. Borrar es irreversible, así que ningún
+ * botón actúa al primer toque: cada uno pide una confirmación que dice
+ * exactamente qué se pierde y qué no.
+ */
+type HistoryTarget = 'sessions' | 'contexts' | 'log' | 'raw' | 'archive' | 'all' | 'app';
+
+function HistoryCard({ backgroundReady }: { backgroundReady: boolean }) {
+  const { state, dispatch, clearContexts } = useStore();
+  const [confirming, setConfirming] = useState<HistoryTarget | null>(null);
+  const [archiveInfo, setArchiveInfo] = useState<ArchiveInfo | null>(null);
+  const [logCount, setLogCount] = useState(0);
+  const [done, setDone] = useState<string | null>(null);
+
+  const reload = useCallback(async () => {
+    setLogCount(summarizeLog(await readLog()).total);
+    if (backgroundReady) {
+      const r = await readArchiveInfo();
+      setArchiveInfo(r ? r.info : null);
+    }
+  }, [backgroundReady]);
+
+  useEffect(() => {
+    void reload();
+  }, [reload, state.monitor.keepHistory]);
+
+  const sessionCount = state.sessions.length + state.pendingSessions.length;
+  const contextCount =
+    state.sessions.filter((s) => s.context).length +
+    state.pendingSessions.filter((s) => s.context).length;
+
+  const wipe = async (target: HistoryTarget) => {
+    switch (target) {
+      case 'sessions':
+        dispatch({ type: 'clearSessions' });
+        break;
+      case 'contexts':
+        clearContexts();
+        break;
+      case 'log':
+        await clearLog();
+        await clearNativeEvents();
+        break;
+      case 'raw':
+        await clearRawEvents();
+        break;
+      case 'archive':
+        await clearArchive();
+        break;
+      case 'all':
+        dispatch({ type: 'clearSessions' });
+        clearContexts();
+        await clearLog();
+        if (backgroundReady) {
+          await clearNativeEvents();
+          await clearRawEvents();
+          await clearArchive();
+        }
+        break;
+      case 'app':
+        dispatch({ type: 'reset' });
+        break;
+    }
+    setConfirming(null);
+    setDone('Borrado hecho.');
+    await reload();
+  };
+
+  const items: {
+    id: Exclude<HistoryTarget, 'all' | 'app'>;
+    label: string;
+    hint: string;
+    count: string;
+    empty: boolean;
+    warn: string;
+    native?: boolean;
+  }[] = [
+    {
+      id: 'sessions',
+      label: 'Noches registradas',
+      hint: 'Tu historial de sueño: las noches confirmadas y las que esperan confirmación.',
+      count: String(sessionCount),
+      empty: sessionCount === 0,
+      warn: 'Se borran todas tus noches de la app (ciclos, estadísticas y notas). El archivo histórico, si lo tienes activado, conserva su copia aparte.',
+    },
+    {
+      id: 'contexts',
+      label: 'Contextos de las noches',
+      hint: 'El resumen del móvil guardado con cada noche.',
+      count: String(contextCount),
+      empty: contextCount === 0,
+      warn: 'Se borra el contexto de todas las noches. Las noches en sí no se tocan.',
+    },
+    {
+      id: 'log',
+      label: 'Registro de detección',
+      hint: 'Las señales recibidas y lo que se hizo con cada una.',
+      count: String(logCount),
+      empty: logCount === 0,
+      warn: 'Se vacía el registro de señales y descartes. No afecta a tus noches.',
+    },
+    {
+      id: 'raw',
+      label: 'Registro bruto reciente',
+      hint: 'Los últimos eventos del servicio: pantalla, cargador y sensores.',
+      count: '',
+      empty: false,
+      warn: 'Se borran los eventos recientes del servicio. No afecta a tus noches.',
+      native: true,
+    },
+    {
+      id: 'archive',
+      label: 'Archivo histórico',
+      hint:
+        archiveInfo && archiveInfo.bytes > 0
+          ? `${formatArchiveRange(archiveInfo.from || archiveInfo.readingsFrom, archiveInfo.to || archiveInfo.readingsTo) ?? 'Sin eventos aún'} · ${archiveInfo.events} eventos, ${archiveInfo.readings} lecturas de sensores`
+          : 'Vacío por ahora',
+      count: formatBytes(archiveInfo?.bytes ?? 0),
+      empty: !archiveInfo || archiveInfo.bytes === 0,
+      warn: 'Se borra para siempre todo el histórico guardado, incluidas las copias de tus noches con su contexto. Tus noches en la app no se tocan.',
+      native: true,
+    },
+  ];
+
+  const confirmBox = (target: HistoryTarget, warn: string, yes: string) => (
+    <>
+      <p style={{ fontSize: '0.76rem', color: 'var(--amber)', lineHeight: 1.55, marginTop: 'var(--sp-2)' }}>
+        {warn} No se puede deshacer.
+      </p>
+      <div className="pending__actions">
+        <button className="btn btn--ghost" onClick={() => setConfirming(null)}>
+          Cancelar
+        </button>
+        <button className="btn btn--danger" onClick={() => void wipe(target)}>
+          {yes}
+        </button>
+      </div>
+    </>
+  );
+
+  return (
+    <Card
+      collapsible
+      title="Historiales"
+      sub="Borra lo que la app ha ido acumulando, pieza a pieza o todo a la vez. Siempre te pedirá confirmación."
+    >
+      {items.map((item) => {
+        const unavailable = item.native && !backgroundReady;
+        return (
+          <div key={item.id} style={{ opacity: unavailable ? 0.55 : 1 }}>
+            <div className="row">
+              <div>
+                <div className="row__label">{item.label}</div>
+                <div className="row__hint">
+                  {item.hint}
+                  {unavailable ? ' Requiere la app instalada.' : ''}
+                </div>
+              </div>
+              {item.count && <Pill tone="primary">{item.count}</Pill>}
+            </div>
+            {confirming === item.id ? (
+              confirmBox(item.id, item.warn, 'Sí, borrar')
+            ) : (
+              <button
+                className="btn btn--ghost btn--full"
+                style={{ marginTop: 'var(--sp-2)' }}
+                disabled={unavailable || item.empty}
+                onClick={() => {
+                  setDone(null);
+                  setConfirming(item.id);
+                }}
+              >
+                Borrar {item.label.toLowerCase()}
+              </button>
+            )}
+          </div>
+        );
+      })}
+
+      <div style={{ marginTop: 'var(--sp-4)' }}>
+        {confirming === 'all' ? (
+          confirmBox(
+            'all',
+            'Se borran las noches, sus contextos, el registro de detección, el registro bruto y el archivo histórico. Los ajustes se conservan.',
+            'Sí, borrar todos los historiales',
+          )
+        ) : (
+          <button
+            className="btn btn--danger btn--full"
+            onClick={() => {
+              setDone(null);
+              setConfirming('all');
+            }}
+          >
+            Borrar todos los historiales
+          </button>
+        )}
+
+        {confirming === 'app' ? (
+          confirmBox(
+            'app',
+            'Vuelve a los valores de fábrica: se borra todo, también los ajustes y el hábito aprendido.',
+            'Sí, restablecer',
+          )
+        ) : (
+          <button
+            className="btn btn--ghost btn--full"
+            style={{ marginTop: 'var(--sp-2)' }}
+            onClick={() => {
+              setDone(null);
+              setConfirming('app');
+            }}
+          >
+            Restablecer la aplicación
+          </button>
+        )}
+      </div>
+
+      {done && (
+        <p style={{ fontSize: '0.76rem', color: 'var(--mint)', marginTop: 'var(--sp-2)' }}>{done}</p>
+      )}
     </Card>
   );
 }

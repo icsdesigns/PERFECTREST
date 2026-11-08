@@ -33,6 +33,39 @@
   line-height: 1.45;
 }
 
+/* Tarjeta plegable: la cabecera entera es el botón. */
+.card--collapsible { padding: 0; }
+.card__toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  width: 100%;
+  min-height: 56px;
+  padding: var(--sp-4) var(--sp-5);
+  background: none;
+  border: 0;
+  border-radius: inherit;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.card__toggle-text { flex: 1 1 auto; min-width: 0; display: block; }
+.card__toggle-text .card__sub { display: block; }
+.card--collapsible:not(.is-open) .card__sub { display: none; }
+.card__chevron {
+  flex: none;
+  width: 0.55rem;
+  height: 0.55rem;
+  border-right: 2px solid var(--text-muted);
+  border-bottom: 2px solid var(--text-muted);
+  transform: rotate(45deg);
+  transition: transform 0.2s var(--ease);
+}
+.card--collapsible.is-open .card__chevron { transform: rotate(-135deg); }
+.card__body { padding: 0 var(--sp-5) var(--sp-5); }
+.card__body[hidden] { display: none; }
+
 .eyebrow {
   font-size: 0.68rem;
   font-weight: 700;

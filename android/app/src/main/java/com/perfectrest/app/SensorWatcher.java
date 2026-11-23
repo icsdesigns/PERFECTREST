@@ -1,7 +1,6 @@
 package com.perfectrest.app;
 
 import android.Manifest;
-import android.app.AlarmManager;
 import android.content.Context;
 import android.content.pm.PackageManager;
 import android.hardware.Sensor;
@@ -46,11 +45,12 @@ import java.util.Set;
  *              al movimiento significativo, que no pide permiso.
  *   light      sensor de luz, por cambio, en tres niveles (oscuro, tenue, claro)
  *              y con la misma entrega diferida. Sólo se anotan los cambios de nivel.
- *   proximity  sensor de proximidad, por cambio, en su variante que no despierta
- *              al procesador (si el móvil sólo tiene la que despierta, se omite).
- *   alarm      la próxima alarma del reloj, consultada al apagarse la pantalla y
- *              con cada rearme del vigilante; no hay nada que escuchar.
- *   audio      si suena algo, consultado en esos mismos momentos.
+ *   audio      si suena algo, consultado al apagarse la pantalla y con cada
+ *              rearme del vigilante; no hay nada que escuchar.
+ *
+ * Proximidad y próxima alarma también fueron sensores. Con 18 noches reales no
+ * aportaron nada: la proximidad siempre marcaba «libre» y la «próxima alarma»
+ * era otra app programando alarmas cada pocos minutos.
  *   posture    postura del móvil con el acelerómetro, en lecturas puntuales: con
  *              la pantalla apagada, en cada rearme del vigilante (cada diez
  *              minutos de noche con este sensor) y unos segundos después de
@@ -73,8 +73,6 @@ final class SensorWatcher {
 
     static final String STEPS = "steps";
     static final String LIGHT = "light";
-    static final String PROXIMITY = "proximity";
-    static final String ALARM = "alarm";
     static final String AUDIO = "audio";
     static final String POSTURE = "posture";
 
@@ -138,7 +136,6 @@ final class SensorWatcher {
 
     private SensorEventListener stepListener;
     private SensorEventListener lightListener;
-    private SensorEventListener proximityListener;
     private TriggerEventListener motionListener;
     private Sensor motionSensor;
 
@@ -162,15 +159,13 @@ final class SensorWatcher {
 
     private float lastStepCount = -1f;
     private int lastLightLevel = -1;
-    private int lastProximity = -1;
     private long lastMotionAt = 0L;
     private boolean audioWasActive = false;
     private long lastAudioLoggedAt = 0L;
-    private long lastAlarmAt = -1L;
     /**
-     * Con el contexto del dispositivo activo también se anotan la próxima alarma
-     * y el audio sonando aunque no sean sensores de detección (son consultas, no
-     * escuchas), y los lux de la luz.
+     * Con el contexto del dispositivo activo también se anota el audio sonando
+     * aunque no sea sensor de detección (es una consulta, no una escucha), y los
+     * lux de la luz.
      */
     private boolean contextExtras = false;
     /**
@@ -197,7 +192,7 @@ final class SensorWatcher {
      * llama en cada rearme.
      */
     void apply(Set<String> wanted) {
-        for (String id : new String[] {STEPS, LIGHT, PROXIMITY, ALARM, AUDIO, POSTURE}) {
+        for (String id : new String[] {STEPS, LIGHT, AUDIO, POSTURE}) {
             boolean want = wanted.contains(id);
             boolean have = active.contains(id);
             if (want && !have) {
@@ -241,10 +236,8 @@ final class SensorWatcher {
             switch (id) {
                 case STEPS: return startSteps();
                 case LIGHT: return startLight();
-                case PROXIMITY: return startProximity();
-                case ALARM:
                 case AUDIO:
-                    // Sin escucha: se consultan en `sample`.
+                    // Sin escucha: se consulta en `sample`.
                     return true;
                 case POSTURE:
                     // Tampoco hay escucha permanente: el acelerómetro sólo se
@@ -283,11 +276,6 @@ final class SensorWatcher {
                 if (lightListener != null) sensors.unregisterListener(lightListener);
                 lightListener = null;
                 lastLightLevel = -1;
-                break;
-            case PROXIMITY:
-                if (proximityListener != null) sensors.unregisterListener(proximityListener);
-                proximityListener = null;
-                lastProximity = -1;
                 break;
             case POSTURE:
                 postureHandler.removeCallbacks(settledReading);
@@ -411,39 +399,10 @@ final class SensorWatcher {
         }
     }
 
-    // --- Proximidad ---
-
-    private boolean startProximity() {
-        if (sensors == null) return false;
-        // La variante por defecto suele ser de las que despiertan el procesador
-        // en cada cambio; se pide expresamente la que no, y si no existe se omite
-        // antes que gastar batería en un sensor que sólo da un dato accesorio.
-        Sensor proximity = sensors.getDefaultSensor(Sensor.TYPE_PROXIMITY, false);
-        if (proximity == null) return false;
-        final float far = proximity.getMaximumRange();
-        proximityListener = new SensorEventListener() {
-            @Override
-            public void onSensorChanged(SensorEvent event) {
-                if (event.values == null || event.values.length == 0) return;
-                int near = event.values[0] < Math.min(far, 5f) ? 1 : 0;
-                if (near == lastProximity) return;
-                lastProximity = near;
-                RawEventLog.addSensor(context, eventTimeMs(event.timestamp), "proximity", near);
-            }
-
-            @Override
-            public void onAccuracyChanged(Sensor sensor, int accuracy) {}
-        };
-        boolean ok = sensors.registerListener(
-            proximityListener, proximity, SensorManager.SENSOR_DELAY_NORMAL, BATCH_LATENCY_US);
-        if (!ok) proximityListener = null;
-        return ok;
-    }
-
-    // --- Alarma y audio: se consultan, no se escuchan ---
+    // --- Audio: se consulta, no se escucha ---
 
     /**
-     * Consulta la próxima alarma y si suena algo. Se llama al apagarse la
+     * Consulta si suena algo. Se llama al apagarse la
      * pantalla y con cada rearme del vigilante (cada quince minutos): no hay
      * ningún temporizador propio ni wakelock, sólo aprovecha momentos en que el
      * servicio ya está despierto.
@@ -461,18 +420,6 @@ final class SensorWatcher {
      */
     void sample(boolean screenJustOff) {
         long now = System.currentTimeMillis();
-
-        if (active.contains(ALARM) || contextExtras) {
-            AlarmManager alarms = (AlarmManager) context.getSystemService(Context.ALARM_SERVICE);
-            if (alarms != null) {
-                AlarmManager.AlarmClockInfo next = alarms.getNextAlarmClock();
-                long at = next == null ? 0L : next.getTriggerTime();
-                if (at != lastAlarmAt) {
-                    lastAlarmAt = at;
-                    RawEventLog.addSensor(context, now, "alarm", at);
-                }
-            }
-        }
 
         if (active.contains(AUDIO) || contextExtras) {
             AudioManager audio = (AudioManager) context.getSystemService(Context.AUDIO_SERVICE);
@@ -839,10 +786,6 @@ final class SensorWatcher {
         out.put(STEPS, steps);
         out.put(LIGHT, new JSONObject().put("available",
             manager != null && manager.getDefaultSensor(Sensor.TYPE_LIGHT) != null));
-        out.put(PROXIMITY, new JSONObject().put("available",
-            manager != null && manager.getDefaultSensor(Sensor.TYPE_PROXIMITY, false) != null));
-        out.put(ALARM, new JSONObject().put("available",
-            context.getSystemService(Context.ALARM_SERVICE) != null));
         out.put(AUDIO, new JSONObject().put("available",
             context.getSystemService(Context.AUDIO_SERVICE) != null));
         out.put(POSTURE, new JSONObject().put("available",

@@ -14,12 +14,9 @@ import { loadJSON, saveJSON } from '../lib/storage';
 import {
   activeNativeTriggers,
   knownNights,
-  proposeFromSchedule,
-  readScheduleMark,
   refineEdges,
   supersedesPending,
   startMonitor,
-  writeScheduleMark,
   type DetectionResult,
 } from '../lib/activityMonitor';
 import { learnHabit, learnLatency, withHabitStart } from '../lib/habit';
@@ -86,6 +83,16 @@ export const initialState: AppState = {
   pendingSessions: [],
   onboarded: false,
 };
+
+/** Los valores guardados de `saved` cuyas claves existen en `defaults`; el resto, de fábrica. */
+function pickKnown<K extends string>(defaults: Record<K, boolean>, saved: Partial<Record<string, boolean>> | undefined): Record<K, boolean> {
+  const out = { ...defaults };
+  for (const key of Object.keys(defaults) as K[]) {
+    const v = saved?.[key];
+    if (typeof v === 'boolean') out[key] = v;
+  }
+  return out;
+}
 
 /** Tiempo que un comentario del aviso espera a su noche antes de soltarse. */
 const NOTE_TTL_MS = 7 * 24 * 3_600_000;
@@ -305,8 +312,11 @@ export function StoreProvider({ children }: { children: ReactNode }) {
               // Los disparadores se mezclan aparte: uno nuevo en una versión
               // posterior debe estrenarse con su valor por defecto en vez de
               // desaparecer bajo el objeto guardado.
-              triggers: { ...DEFAULT_TRIGGERS, ...stored.monitor?.triggers },
-              sensors: { ...DEFAULT_SENSORS, ...stored.monitor?.sensors },
+              // Sólo los disparadores y sensores que siguen existiendo: los
+              // retirados (Doze, «no molestar», horario, proximidad, alarma)
+              // se olvidan al cargar.
+              triggers: pickKnown(DEFAULT_TRIGGERS, stored.monitor?.triggers),
+              sensors: pickKnown(DEFAULT_SENSORS, stored.monitor?.sensors),
             },
             // Un contexto con otra forma o desmesurado se suelta; las sesiones
             // anteriores a la función, sin contexto, quedan como estaban.
@@ -408,32 +418,6 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       }),
       onBeat: (ts) => dispatch({ type: 'patch', patch: { lastActiveAt: ts } }),
       onDeviceUse: (ts) => dispatch({ type: 'patch', patch: { lastDeviceUseAt: ts } }),
-      // Ninguna señal esta vez: es el turno del disparador de horario, que
-      // necesita las metas y el historial y por eso se resuelve aquí.
-      onQuiet: (now) => {
-        void (async () => {
-          const { schedule, monitor, sessions, pendingSessions } = stateRef.current;
-          if (pendingSessions.length) return;
-          const proposal = proposeFromSchedule(
-            schedule,
-            monitor,
-            sessions,
-            await readScheduleMark(),
-            now,
-          );
-          if (!proposal) return;
-          // Se marca antes de proponer: si el usuario la descarta, no debe
-          // reaparecer en la siguiente apertura del mismo día.
-          await writeScheduleMark(proposal.key);
-          await logEvent(
-            'schedule',
-            'detect',
-            'ninguna otra señal esa noche: se propone la meta del horario',
-            proposal.result.session.end,
-          );
-          propose(proposal.result);
-        })();
-      },
     });
 
     return () => handle.stop();

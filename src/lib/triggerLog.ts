@@ -139,7 +139,7 @@ export function eventTone(kind: TriggerEventKind): 'mint' | 'amber' | 'rose' | '
 
 /** Una línea legible: «07:10 · pantalla · vuelves al móvil — tras 7h 50m». */
 export function describeEvent(e: TriggerEvent): string {
-  const who = e.trigger ? TRIGGER_SHORT[e.trigger] : 'servicio';
+  const who = e.trigger ? (TRIGGER_SHORT[e.trigger] ?? e.trigger) : 'servicio';
   const what = EVENT_LABEL[e.kind];
   const base = `${formatClock(e.at)} · ${who} · ${what}`;
   return e.detail ? `${base} — ${e.detail}` : base;

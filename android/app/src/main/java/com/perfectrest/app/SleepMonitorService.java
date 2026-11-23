@@ -50,20 +50,15 @@ import java.util.Set;
  * que siempre se puede preguntar— y no esperando una señal que puede no venir.
  * Ver {@link #watchForUnlock()}.
  *
- * Se registran cuatro disparadores independientes, cada uno activable desde
- * los ajustes de la app:
+ * Se registran dos disparadores independientes, cada uno activable desde los
+ * ajustes de la app:
  *
  *   screen   SCREEN_OFF            -> se quita el cerrojo      (lo suelta / vuelve)
  *   charger  POWER_CONNECTED       -> POWER_DISCONNECTED      (lo enchufa / lo suelta)
- *   idle     entra en Doze         -> sale de Doze            (el sistema lo da por quieto)
- *   dnd      «No molestar» activo  -> «No molestar» apagado   (se va a dormir)
  *
- * Van por separado porque cada uno se rompe por su lado: la pantalla no dice
- * nada de quien duerme sin bloqueo seguro, el cargador no sirve a quien no
- * carga de noche, Doze no llega si el móvil recibe notificaciones toda la
- * madrugada y «No molestar» sólo existe si el usuario lo usa. Lo que uno
- * pierde, otro lo cubre; y cuando dos coinciden sobre la misma noche, la capa
- * web propone la sesión con más confianza.
+ * Doze y «No molestar» también fueron disparadores. Con 18 noches reales no
+ * aportaron nada: Doze sólo dejaba salidas sueltas cada seis horas y «No
+ * molestar» iba por horario, así que decía la hora del reloj y no el sueño.
  *
  * El hueco entre los dos extremos es tiempo real sin usar el móvil, mucho más
  * preciso que deducirlo de cuándo se abre la app. Cuando supera el umbral
@@ -152,12 +147,10 @@ public class SleepMonitorService extends Service {
 
     public static final String TRIGGER_SCREEN = "screen";
     public static final String TRIGGER_CHARGER = "charger";
-    public static final String TRIGGER_IDLE = "idle";
-    public static final String TRIGGER_DND = "dnd";
 
-    /** Los cuatro disparadores que este servicio sabe escuchar. */
+    /** Los disparadores que este servicio sabe escuchar. */
     public static final String[] NATIVE_TRIGGERS = {
-        TRIGGER_SCREEN, TRIGGER_CHARGER, TRIGGER_IDLE, TRIGGER_DND
+        TRIGGER_SCREEN, TRIGGER_CHARGER
     };
 
     /**
@@ -605,14 +598,6 @@ public class SleepMonitorService extends Service {
             filter.addAction(Intent.ACTION_POWER_DISCONNECTED);
             any = true;
         }
-        if (triggerOn(TRIGGER_IDLE)) {
-            filter.addAction(PowerManager.ACTION_DEVICE_IDLE_MODE_CHANGED);
-            any = true;
-        }
-        if (triggerOn(TRIGGER_DND)) {
-            filter.addAction(NotificationManager.ACTION_INTERRUPTION_FILTER_CHANGED);
-            any = true;
-        }
         if (!any) {
             recordError("Ningún disparador del dispositivo está activo: el servicio no escucha nada.");
             return;
@@ -730,42 +715,6 @@ public class SleepMonitorService extends Service {
                 closeGap(TRIGGER_CHARGER, now, false);
                 break;
 
-            case PowerManager.ACTION_DEVICE_IDLE_MODE_CHANGED:
-                // Doze: el sistema da el móvil por quieto tras un rato sin
-                // pantalla ni movimiento, y sale de golpe en cuanto se toca.
-                // Es más tardío que SCREEN_OFF —Android tarda en decidirlo—
-                // pero llega aunque no haya bloqueo de pantalla, que es
-                // exactamente el hueco que deja el disparador de pantalla.
-                if (deviceIdle()) {
-                    RawEventLog.add(this, "idle-on");
-                    openGap(TRIGGER_IDLE, now, false);
-                } else if (interactive()) {
-                    RawEventLog.add(this, "idle-off");
-                    closeGap(TRIGGER_IDLE, now, true);
-                } else {
-                    // Android sale de Doze cada pocas horas para dejar correr
-                    // las tareas pendientes y vuelve a entrar en cuanto
-                    // termina. La pantalla sigue apagada y el usuario sigue
-                    // durmiendo, así que esto no es una vuelta al móvil: era
-                    // lo que partía la noche en trozos de dos o tres horas.
-                    logEvent(this, TRIGGER_IDLE, "discard",
-                        "salida de Doze con la pantalla apagada: ventana de mantenimiento");
-                }
-                break;
-
-            case NotificationManager.ACTION_INTERRUPTION_FILTER_CHANGED:
-                // «No molestar» activo: la única señal de las cuatro que
-                // expresa intención y no consecuencia. Quien lo enciende al
-                // acostarse está diciendo la hora a la que se acuesta.
-                if (dndActive()) {
-                    RawEventLog.add(this, "dnd-on");
-                    openGap(TRIGGER_DND, now, false);
-                } else {
-                    RawEventLog.add(this, "dnd-off");
-                    closeGap(TRIGGER_DND, now, false);
-                }
-                break;
-
             default:
                 break;
         }
@@ -859,15 +808,11 @@ public class SleepMonitorService extends Service {
     /**
      * El usuario ha vuelto al móvil: se cierran los huecos que eso termina.
      *
-     * Va junto porque las dos señales describen el mismo hecho desde ángulos
-     * distintos, y Doze puede haber salido ya con la pantalla apagada o no
-     * haber salido todavía. En ambos casos el usuario está delante.
      */
     private void userIsBack(long now) {
         stopWatchingForUnlock();
         RawEventLog.addDistinct(this, "unlock", 3_000L);
         screenInUse(now);
-        closeGap(TRIGGER_IDLE, now, true);
     }
 
     /**
@@ -1115,8 +1060,7 @@ public class SleepMonitorService extends Service {
         // Un uso de madrugada que ya se sostuvo y cuyo temporizador se perdió con
         // el proceso: se resuelve aquí en vez de dejar el hueco abierto.
         checkSustainedUse();
-        if (prefs().getLong(openKey(TRIGGER_SCREEN), 0L) <= 0
-            && prefs().getLong(openKey(TRIGGER_IDLE), 0L) <= 0) return;
+        if (prefs().getLong(openKey(TRIGGER_SCREEN), 0L) <= 0) return;
 
         logEvent(this, TRIGGER_SCREEN, "close",
             "el móvil está desbloqueado con un hueco abierto: se cierra sin esperar a la señal");
@@ -1127,21 +1071,6 @@ public class SleepMonitorService extends Service {
     private boolean interactive() {
         PowerManager power = (PowerManager) getSystemService(Context.POWER_SERVICE);
         return power != null && power.isInteractive();
-    }
-
-    /** ¿Está el sistema en reposo profundo ahora mismo? */
-    private boolean deviceIdle() {
-        PowerManager power = (PowerManager) getSystemService(Context.POWER_SERVICE);
-        return power != null && power.isDeviceIdleMode();
-    }
-
-    /** ¿Hay algún filtro de interrupciones activo («No molestar», prioridad, alarmas)? */
-    private boolean dndActive() {
-        NotificationManager manager = getSystemService(NotificationManager.class);
-        if (manager == null) return false;
-        int filter = manager.getCurrentInterruptionFilter();
-        return filter != NotificationManager.INTERRUPTION_FILTER_ALL
-            && filter != NotificationManager.INTERRUPTION_FILTER_UNKNOWN;
     }
 
     private long minGapMs() {
@@ -1167,16 +1096,6 @@ public class SleepMonitorService extends Service {
             // no ha vuelto, y el desbloqueo que viene puede no llegar como
             // difusión. Se vigila igual que tras un SCREEN_ON.
             watchForUnlock();
-        }
-        // Mismo razonamiento para los otros dos disparadores de estado: Doze y
-        // «No molestar» son condiciones continuas, no instantes, así que al
-        // arrancar hay que mirar en cuál está el sistema en vez de esperar un
-        // cambio que ya ocurrió.
-        if (triggerOn(TRIGGER_IDLE) && deviceIdle()) {
-            openGap(TRIGGER_IDLE, now, false);
-        }
-        if (triggerOn(TRIGGER_DND) && dndActive()) {
-            openGap(TRIGGER_DND, now, false);
         }
     }
 

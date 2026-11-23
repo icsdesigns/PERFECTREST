@@ -11,7 +11,9 @@
  * Verdad de cada noche (mismo criterio que escribió el usuario):
  *   - comentario con hora («me acosté a las 00:00») → inicio real;
  *   - «no he dormido» → ahí no hubo sueño;
- *   - «correcto» o sin comentario desde el 15/11 → la propuesta es buena.
+ *   - «correcto» o sin comentario desde el 15/11 → la propuesta es buena;
+ *   - con PERFECTREST_NO_NAPS=1, toda siesta es un falso positivo (el usuario
+ *     confirmó que no durmió ninguna en todo el registro del 24/11/2026).
  */
 import { existsSync, readFileSync } from 'node:fs';
 
@@ -75,7 +77,7 @@ history.forEach((s, i) => {
   if (s.end < firstRaw || !s.detectedStart || !s.detectedEnd) return;
   const t = parseNote(s);
   const silentOk = !s.note && s.end >= SILENT_OK_FROM;
-  const falsePositive = t.notSleep;
+  const falsePositive = t.notSleep || (!!s.nap && !!process.env.PERFECTREST_NO_NAPS);
   const truthStart = t.start ?? (t.accepted || silentOk ? s.start : null);
   if (truthStart === null && !falsePositive) return;
   nights++;

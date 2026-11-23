@@ -68,7 +68,8 @@ const MON: MonitorSettings = {
   background: true,
   wakeSummary: true,
   triggers: { ...DEFAULT_TRIGGERS },
-  sensors: { ...DEFAULT_SENSORS },
+  // Este banco no tiene registro bruto: sin sensores.
+  sensors: Object.fromEntries(Object.keys(DEFAULT_SENSORS).map((k) => [k, false])) as typeof DEFAULT_SENSORS,
   saveContext: true,
   contextSince: 0,
 };

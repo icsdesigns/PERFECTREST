@@ -1,4 +1,4 @@
-import { DAY, HOUR, MINUTE, formatDuration } from './time';
+import { DAY, MINUTE, formatDuration } from './time';
 import { TRIGGER_SHORT } from './triggers';
 import { SENSOR_BY_ID } from './sensors';
 import {
@@ -87,8 +87,6 @@ function valueAt(list: RawEvent[] | undefined, t: number): number | null {
   }
   return value;
 }
-
-const round1 = (n: number) => Math.round(n * 10) / 10;
 
 /**
  * Resume una serie de estados: valor al inicio y al final de la sesión,
@@ -223,42 +221,7 @@ function summarizeScreen(
   };
 }
 
-// --- Alarma, audio, luz y demás sensores --------------------------------------
-
-function summarizeAlarm(
-  by: ByKind,
-  to: number,
-  start: number,
-  end: number,
-  now: number,
-): NonNullable<NonNullable<SessionContext['sensors']>['alarm']> | undefined {
-  const alarms = (by.get('alarm') ?? []).filter((e) => e.at <= to);
-  if (!alarms.length) return undefined;
-
-  const atStart = valueAt(alarms, start);
-  const setAtStart = atStart === null ? null : atStart > 0;
-
-  // La alarma de esta mañana: la programada más cercana al despertar.
-  const times = [...new Set(alarms.map((e) => e.v ?? 0).filter((v) => v > 0))].filter(
-    (t) => t >= end - 5 * HOUR && t <= end + 30 * MINUTE,
-  );
-  if (!times.length) return { at: null, status: 'none', setAtStart };
-  const target = times.reduce((best, t) => (Math.abs(t - end) <= Math.abs(best - end) ? t : best));
-
-  const base = { at: target, deltaMin: Math.round((target - end) / MINUTE), setAtStart };
-  if (target > now) return { ...base, status: 'pending' };
-
-  // ¿Se canceló o cambió antes de sonar? Un cambio posterior a la hora es
-  // simplemente la siguiente alarma que toma el relevo.
-  const firstSet = alarms.findIndex((e) => e.v === target);
-  const changed = alarms.slice(firstSet + 1).some((e) => e.at < target - MINUTE && e.v !== target);
-  if (changed) return { ...base, status: 'cancelled' };
-
-  const screen = (by.get('screen-on') ?? []).some(
-    (e) => e.at >= target - 2 * MINUTE && e.at <= target + 15 * MINUTE,
-  );
-  return { ...base, status: screen ? 'rang' : 'no-screen' };
-}
+// --- Audio, luz y demás sensores --------------------------------------
 
 function summarizeAudio(
   by: ByKind,
@@ -296,7 +259,6 @@ function summarizeSensors(
   to: number,
   start: number,
   end: number,
-  now: number,
   on: SensorId[],
 ): NonNullable<SessionContext['sensors']> {
   const out: NonNullable<SessionContext['sensors']> = { on };
@@ -324,10 +286,6 @@ function summarizeSensors(
       };
     }
   }
-  if (has('proximity')) {
-    const prox = summarizeState(by.get('proximity'), from, to, start, end, true);
-    if (prox) out.proximity = { coveredPct: prox.pct?.['1'] ?? 0, changes: prox.changes };
-  }
   if (has('posture')) {
     const readings = (by.get('posture') ?? []).filter(inRange);
     if (readings.length) {
@@ -340,12 +298,10 @@ function summarizeSensors(
       };
     }
   }
-  // La alarma y el audio se consultan sin escuchar nada: se resumen siempre
-  // que el servicio los haya anotado, estén o no activos como sensor.
+  // El audio se consulta sin escuchar nada: se resume siempre que el servicio
+  // lo haya anotado, esté o no activo como sensor.
   const audio = summarizeAudio(by, from, to);
   if (audio) out.audio = audio;
-  const alarm = summarizeAlarm(by, to, start, end, now);
-  if (alarm) out.alarm = alarm;
   return out;
 }
 
@@ -353,8 +309,7 @@ function summarizeSensors(
 
 /** Eventos que merece la pena recordar uno a uno; el resto sólo cuenta en los agregados. */
 const NOTABLE: ReadonlySet<RawKind> = new Set<RawKind>([
-  'unlock', 'plug', 'unplug', 'airplane', 'dnd-mode', 'dnd-on', 'dnd-off', 'ringer',
-  'powersave', 'doze', 'idle-on', 'idle-off', 'alarm', 'bt', 'net', 'chg-type',
+  'unlock', 'plug', 'unplug', 'chg-type',
 ]);
 
 function timeline(events: RawEvent[], from: number, to: number, start: number): SessionContext['timeline'] {
@@ -364,7 +319,7 @@ function timeline(events: RawEvent[], from: number, to: number, start: number): 
     .slice(0, MAX_TIMELINE)
     .map((e) => {
       const minutes = Math.round((e.at - start) / MINUTE);
-      return e.kind === 'alarm' || e.v === undefined
+      return e.v === undefined
         ? ([minutes, e.kind] as [number, string])
         : ([minutes, e.kind, e.v] as [number, string, number]);
     });
@@ -429,53 +384,19 @@ export function buildContext(input: ContextInput): SessionContext {
       const plugSeries = summarizeState(plugEvents, from, to, start, end, true);
       if (plugSeries?.pct) chargingPct = plugSeries.pct['1'] ?? 0;
     }
-    const battery = summarizeState(by.get('batt'), from, to, start, end, false);
-    const temps = (by.get('batt-temp') ?? []).filter((e) => e.at >= from && e.at <= to);
-    const tempBefore = valueAt(by.get('batt-temp'), from);
-    const tempVals = [...temps.map((e) => e.v ?? 0), ...(tempBefore !== null ? [tempBefore] : [])];
     const plugs = (by.get('plug') ?? []).filter((e) => e.at >= from && e.at <= to).length;
     const unplugs = (by.get('unplug') ?? []).filter((e) => e.at >= from && e.at <= to).length;
-    if (chargeType || battery || tempVals.length || plugs || unplugs || plugEvents.length) {
+    if (chargeType || plugs || unplugs || plugEvents.length) {
       ctx.power = {
         plugs,
         unplugs,
         chargingPct,
         ...(chargeType ? { chargeType } : {}),
-        ...(battery ? { battery } : {}),
-        ...(tempVals.length
-          ? { tempC: { min: round1(Math.min(...tempVals) / 10), max: round1(Math.max(...tempVals) / 10) } }
-          : {}),
       };
     }
 
-    // Reposo profundo: el muestreo y los eventos del disparador cuentan igual.
-    const dozeList = [
-      ...(by.get('doze') ?? []),
-      ...(by.get('idle-on') ?? []).map((e) => ({ at: e.at, kind: 'doze' as RawKind, v: 1 })),
-      ...(by.get('idle-off') ?? []).map((e) => ({ at: e.at, kind: 'doze' as RawKind, v: 0 })),
-    ].sort((a, b) => a.at - b.at);
 
-    const system: NonNullable<SessionContext['system']> = {};
-    const put = <K extends keyof NonNullable<SessionContext['system']>>(
-      key: K,
-      list: RawEvent[] | undefined,
-      discrete: boolean,
-    ) => {
-      const s = summarizeState(list, from, to, start, end, discrete);
-      if (s) system[key] = s;
-    };
-    put('doze', dozeList, true);
-    put('dnd', by.get('dnd-mode'), true);
-    put('airplane', by.get('airplane'), true);
-    put('powerSave', by.get('powersave'), true);
-    put('ringer', by.get('ringer'), true);
-    put('net', by.get('net'), true);
-    put('bt', by.get('bt'), false);
-    put('bright', by.get('bright'), false);
-    put('orient', by.get('orient'), true);
-    if (Object.keys(system).length) ctx.system = system;
-
-    ctx.sensors = summarizeSensors(by, from, to, start, end, now, sensorsOn);
+    ctx.sensors = summarizeSensors(by, from, to, start, end, sensorsOn);
     if (input.nativeLog) {
       const inRange = input.nativeLog.filter((e) => e.at >= from && e.at <= to);
       ctx.service = {
@@ -607,7 +528,6 @@ export function buildAlgo(input: AlgoInput): ContextAlgo {
       moves: ev.moves,
       flat: ev.flat === null ? null : Math.round(ev.flat * 100) / 100,
       litFlat: ev.litFlat === null ? null : Math.round(ev.litFlat * 100) / 100,
-      alarmMatch: ev.alarmMatch,
     };
   }
   if (result.discards?.length) {
@@ -703,7 +623,6 @@ export function stripContexts(sessions: SleepSession[]): SleepSession[] {
 
 type Cell = string | number | undefined;
 
-const pctOf = (s: StateSummary | undefined, key: string) => s?.pct?.[key];
 const join = (xs: Array<string | number> | undefined) => (xs && xs.length ? xs.join('|') : undefined);
 const num = (n: number | null | undefined): number | undefined => (n === null || n === undefined ? undefined : n);
 const flag = (b: boolean | null | undefined): number | undefined => (b === null || b === undefined ? undefined : b ? 1 : 0);
@@ -713,13 +632,9 @@ export const CONTEXT_COLUMNS = [
   'ctx_parcial', 'ctx_modelo', 'ctx_android', 'ctx_app', 'ctx_zona', 'ctx_desfase_min', 'ctx_idioma',
   'pantalla_encendidos', 'pantalla_desbloqueos', 'pantalla_vistazos', 'pantalla_micro_despertares',
   'pantalla_uso_s', 'pantalla_uso_max_s', 'pantalla_usos_s', 'pantalla_encendida_inicio', 'pantalla_encendida_fin',
-  'bateria_inicio', 'bateria_fin', 'bateria_min', 'bateria_max', 'bateria_temp_max_c',
   'carga_pct', 'enchufes', 'desenchufes', 'carga_tipo_inicio', 'carga_tipo_fin',
-  'doze_pct', 'dnd_pct', 'dnd_modo_inicio', 'avion_pct', 'ahorro_pct',
-  'timbre_inicio', 'timbre_fin', 'red_inicio', 'red_fin', 'red_sin_conexion_pct', 'bt_audio_max',
-  'brillo_inicio', 'brillo_fin',
-  'luz_oscuro_pct', 'lux_min', 'lux_max', 'pasos', 'movimientos', 'proximidad_tapado_pct',
-  'postura_lecturas', 'postura_plano_pct', 'audio_pct', 'alarma_estado', 'alarma_hora', 'alarma_desfase_min',
+  'luz_oscuro_pct', 'lux_min', 'lux_max', 'pasos', 'movimientos',
+  'postura_lecturas', 'postura_plano_pct', 'audio_pct',
   'servicio_reinicios', 'servicio_errores',
   'algo_disparadores', 'algo_confianza', 'algo_inferida', 'algo_puntuacion', 'algo_hueco_min',
   'algo_latencia_min', 'algo_latencia_origen', 'algo_habito_inicio_min', 'algo_habito_noches', 'algo_descartes',
@@ -733,7 +648,6 @@ export function flattenContext(ctx: SessionContext | undefined): Partial<Record<
   const d = ctx.device;
   const scr = ctx.screen;
   const pow = ctx.power;
-  const sys = ctx.system;
   const sen = ctx.sensors;
   const a = ctx.algo;
   return {
@@ -753,41 +667,19 @@ export function flattenContext(ctx: SessionContext | undefined): Partial<Record<
     pantalla_usos_s: join(scr?.usesSec),
     pantalla_encendida_inicio: flag(scr?.onAtStart),
     pantalla_encendida_fin: flag(scr?.onAtEnd),
-    bateria_inicio: num(pow?.battery?.start),
-    bateria_fin: num(pow?.battery?.end),
-    bateria_min: pow?.battery?.min,
-    bateria_max: pow?.battery?.max,
-    bateria_temp_max_c: pow?.tempC?.max,
     carga_pct: num(pow?.chargingPct),
     enchufes: pow?.plugs,
     desenchufes: pow?.unplugs,
     carga_tipo_inicio: num(pow?.chargeType?.start),
     carga_tipo_fin: num(pow?.chargeType?.end),
-    doze_pct: sys?.doze ? (pctOf(sys.doze, '1') ?? 0) : undefined,
-    dnd_pct: sys?.dnd ? 100 - (pctOf(sys.dnd, '1') ?? 0) : undefined,
-    dnd_modo_inicio: num(sys?.dnd?.start),
-    avion_pct: sys?.airplane ? (pctOf(sys.airplane, '1') ?? 0) : undefined,
-    ahorro_pct: sys?.powerSave ? (pctOf(sys.powerSave, '1') ?? 0) : undefined,
-    timbre_inicio: num(sys?.ringer?.start),
-    timbre_fin: num(sys?.ringer?.end),
-    red_inicio: num(sys?.net?.start),
-    red_fin: num(sys?.net?.end),
-    red_sin_conexion_pct: sys?.net ? (pctOf(sys.net, '0') ?? 0) : undefined,
-    bt_audio_max: sys?.bt?.max,
-    brillo_inicio: num(sys?.bright?.start),
-    brillo_fin: num(sys?.bright?.end),
     luz_oscuro_pct: sen?.light?.pct.dark,
     lux_min: sen?.light?.luxMin,
     lux_max: sen?.light?.luxMax,
     pasos: sen?.steps?.steps,
     movimientos: sen?.steps?.motions,
-    proximidad_tapado_pct: num(sen?.proximity?.coveredPct),
     postura_lecturas: sen?.posture?.readings,
     postura_plano_pct: sen?.posture?.flatPct,
     audio_pct: sen?.audio?.playingPct,
-    alarma_estado: sen?.alarm?.status,
-    alarma_hora: sen?.alarm?.at ? new Date(sen.alarm.at).toISOString() : undefined,
-    alarma_desfase_min: sen?.alarm?.deltaMin,
     servicio_reinicios: ctx.service?.restarts,
     servicio_errores: ctx.service?.errors,
     algo_disparadores: join(a?.triggers),
@@ -810,33 +702,12 @@ export interface ContextSection {
   rows: Array<{ label: string; value: string }>;
 }
 
-const NET_TEXT: Record<number, string> = {
-  0: 'sin conexión',
-  1: 'Wi-Fi',
-  2: 'datos móviles',
-  3: 'Ethernet',
-  4: 'otra red (VPN o Bluetooth)',
-};
-const RINGER_TEXT: Record<number, string> = { 0: 'silencio', 1: 'vibrar', 2: 'normal' };
 const CHARGE_TEXT: Record<number, string> = {
   0: 'sin cargar',
   1: 'cargador de pared',
   2: 'USB',
   3: 'inalámbrica',
   4: 'base',
-};
-const DND_TEXT: Record<number, string> = {
-  1: 'desactivado',
-  2: 'sólo prioritarias',
-  3: 'silencio total',
-  4: 'sólo alarmas',
-};
-const ALARM_TEXT: Record<string, string> = {
-  rang: 'sonó (la pantalla se encendió a esa hora)',
-  cancelled: 'se canceló o cambió antes de sonar',
-  'no-screen': 'sin actividad de pantalla a esa hora',
-  pending: 'aún no había llegado su hora',
-  none: 'sin alarma cerca del despertar',
 };
 const CONFIDENCE_TEXT = { high: 'alta', medium: 'media', low: 'baja' } as const;
 /** Motivos de descarte de un hueco, en corto (los largos están en `activityMonitor.ts`). */
@@ -860,10 +731,6 @@ function hm(min: number): string {
   const m = ((Math.round(min) % 1440) + 1440) % 1440;
   return `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
 }
-function clock(ts: number): string {
-  const d = new Date(ts);
-  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
-}
 /**
  * Duración legible: «45 s», «2 min 5 s», «1 h 2 min». Con espacios que no
  * parten, para que una lista larga de usos no corte «5» de su «s» a 320 px.
@@ -880,8 +747,6 @@ function secs(s: number): string {
   const r = s % 60;
   return r ? `${m}${nb}min${nb}${r}${nb}s` : `${m}${nb}min`;
 }
-/** Decimal con coma, como se escribe en español: 24,5. */
-const dec = (n: number) => String(n).replace('.', ',');
 const yesNo = (b: boolean | null | undefined) => (b === null || b === undefined ? undefined : b ? 'sí' : 'no');
 const pct = (n: number | undefined | null) => (n === undefined || n === null ? undefined : `${n} %`);
 
@@ -894,14 +759,6 @@ function fromTo(s: StateSummary | undefined, text: (v: number) => string): strin
   return a ?? b;
 }
 
-/** Reparto del tramo por valor, «Wi-Fi 90 %, sin conexión 10 %». */
-function shares(s: StateSummary | undefined, text: (v: number) => string): string | undefined {
-  if (!s?.pct) return undefined;
-  const parts = Object.entries(s.pct)
-    .sort((x, y) => y[1] - x[1])
-    .map(([k, p]) => `${text(Number(k))} ${p} %`);
-  return parts.length ? parts.join(', ') : undefined;
-}
 
 /**
  * El contexto en frases para la hoja de sesión. Defensivo a propósito: lo
@@ -940,25 +797,10 @@ export function describeContext(ctx: SessionContext | undefined): ContextSection
     ]);
 
     const p = ctx.power;
-    add('Batería y carga', [
-      ['Batería', p?.battery ? `${p.battery.start ?? '?'} % → ${p.battery.end ?? '?'} % (de ${p.battery.min ?? '?'} a ${p.battery.max ?? '?'} %)` : undefined],
-      ['Temperatura de la batería', p?.tempC ? `${dec(p.tempC.min)} a ${dec(p.tempC.max)} °C` : undefined],
+    add('Carga', [
       ['Tiempo enchufado', pct(p?.chargingPct)],
       ['Enchufado / desenchufado', p ? `${p.plugs} / ${p.unplugs}` : undefined],
       ['Tipo de carga', fromTo(p?.chargeType, (v) => CHARGE_TEXT[v] ?? `código ${v}`)],
-    ]);
-
-    const y = ctx.system;
-    add('Sistema', [
-      ['Reposo profundo (Doze)', y?.doze ? `${pctOf(y.doze, '1') ?? 0} % del tiempo` : undefined],
-      ['No molestar', fromTo(y?.dnd, (v) => DND_TEXT[v] ?? `código ${v}`)],
-      ['Modo avión', y?.airplane ? `${pctOf(y.airplane, '1') ?? 0} % del tiempo` : undefined],
-      ['Ahorro de energía', y?.powerSave ? `${pctOf(y.powerSave, '1') ?? 0} % del tiempo` : undefined],
-      ['Timbre', fromTo(y?.ringer, (v) => RINGER_TEXT[v] ?? `código ${v}`)],
-      ['Red', shares(y?.net, (v) => NET_TEXT[v] ?? `código ${v}`)],
-      ['Bluetooth de audio conectado', y?.bt ? `hasta ${y.bt.max ?? 0}` : undefined],
-      ['Brillo de la pantalla', y?.bright ? `${y.bright.start ?? '?'} % → ${y.bright.end ?? '?'} %` : undefined],
-      ['Orientación', fromTo(y?.orient, (v) => (v === 2 ? 'horizontal' : 'vertical'))],
     ]);
 
     const n = ctx.sensors;
@@ -966,16 +808,8 @@ export function describeContext(ctx: SessionContext | undefined): ContextSection
       ['Activos para detectar', n ? (n.on.length ? n.on.map((id) => SENSOR_BY_ID[id]?.label ?? id).join(', ') : 'ninguno') : undefined],
       ['Pasos / movimiento', n?.steps ? `${n.steps.steps} pasos, ${n.steps.motions} avisos de movimiento` : undefined],
       ['Luz', n?.light ? `oscuro ${n.light.pct.dark} %, tenue ${n.light.pct.dim} %, claro ${n.light.pct.bright} %${n.light.luxMax !== undefined ? ` (${n.light.luxMin}–${n.light.luxMax} lux)` : ''}` : undefined],
-      ['Proximidad', n?.proximity ? `tapado ${n.proximity.coveredPct ?? '?'} %, ${n.proximity.changes} cambios` : undefined],
       ['Postura del móvil', n?.posture ? `${n.posture.readings} lecturas, plano ${n.posture.flatPct} %` : undefined],
       ['Audio sonando', n?.audio ? `${n.audio.playingPct} % del tiempo` : undefined],
-    ]);
-
-    const al = n?.alarm;
-    add('Alarma', [
-      ['Alarma programada al dormirte', yesNo(al?.setAtStart)],
-      ['Alarma del despertar', al?.at ? `${clock(al.at)}${al.deltaMin !== undefined ? ` (${al.deltaMin >= 0 ? '+' : '−'}${Math.abs(al.deltaMin)} min respecto a tu despertar)` : ''}` : undefined],
-      ['Qué pasó', al ? ALARM_TEXT[al.status] : undefined],
     ]);
 
     add('Servicio', [

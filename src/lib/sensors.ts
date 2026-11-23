@@ -9,8 +9,9 @@ import type { MonitorSettings, SensorId } from './types';
  * anterior a dormirse de verdad (se apaga la pantalla y se sigue despierto),
  * y la primera vez que se vuelve a coger puede ser muy posterior a levantarse.
  *
- * Todos son nativos, de muestreo muy ligero y desactivados por defecto: el
- * usuario decide cuáles activa. Cada uno se degrada con elegancia si el móvil
+ * Todos son nativos y de muestreo muy ligero. Postura, pasos y luz vienen
+ * activos (con 18 noches reales son los que mejor separan dormido de
+ * despierto) y el usuario puede apagarlos. Cada uno se degrada con elegancia si el móvil
  * no tiene el sensor o falta el permiso (ver `SensorAvailability`). Ninguno
  * usa el micrófono: «audio» sólo pregunta al sistema si hay algo sonando.
  */
@@ -21,6 +22,12 @@ export interface SensorSpec {
   hint: string;
   /** Pide un permiso en tiempo de ejecución (sólo «steps», en Android 10+). */
   needsPermission: boolean;
+  /**
+   * Activo en una instalación nueva. Lo están los que más separan dormido de
+   * despierto en noches reales (postura, pasos y luz); el audio, que aporta
+   * poco, se queda a elección del usuario.
+   */
+  defaultOn: boolean;
 }
 
 export const SENSORS: SensorSpec[] = [
@@ -29,36 +36,28 @@ export const SENSORS: SensorSpec[] = [
     label: 'Pasos y movimiento',
     hint: 'Nota si sigues andando por casa después de dejar el móvil o si te levantas antes de cogerlo: ajusta cuándo te dormiste y cuándo despertaste. Pide el permiso «Actividad física»; sin él usa sólo el movimiento significativo, que es menos fino.',
     needsPermission: true,
+    defaultOn: true,
   },
   {
     id: 'light',
     label: 'Luz ambiente',
     hint: 'Apagar la luz de la habitación es la señal más clara de que te vas a dormir. Sólo anota si hay luz, penumbra u oscuridad, nunca imágenes. Funciona mejor con el móvil boca arriba: boca abajo siempre parece de noche.',
     needsPermission: false,
-  },
-  {
-    id: 'proximity',
-    label: 'Proximidad',
-    hint: 'Nota si el móvil está tapado (en el bolsillo o boca abajo) y cuándo lo destapas, aunque no lo desbloquees. Sólo se usa si tu móvil tiene la versión del sensor que no lo despierta, para no gastar batería.',
-    needsPermission: false,
-  },
-  {
-    id: 'alarm',
-    label: 'Próxima alarma',
-    hint: 'Lee la hora de tu próxima alarma del reloj para saber a qué hora esperas despertar. Si coincide con el final de la noche, la propuesta sube de confianza.',
-    needsPermission: false,
+    defaultOn: true,
   },
   {
     id: 'posture',
     label: 'Postura del móvil',
     hint: 'Con la pantalla apagada mira cada pocos minutos, durante un par de segundos, si el móvil está plano y quieto (sobre la mesa o la cama) o en el bolsillo o la mano. Plano y quieto cuenta como quietud y sube la confianza; en el bolsillo o la mano aún no estás dormido. Usa el acelerómetro, nunca el micrófono ni la cámara, y no mantiene nada encendido entre lecturas.',
     needsPermission: false,
+    defaultOn: true,
   },
   {
     id: 'audio',
     label: 'Audio sonando',
     hint: 'Si hay música, un pódcast o un vídeo sonando con la pantalla apagada, aún no te has dormido. No usa el micrófono: sólo pregunta al sistema si algo suena.',
     needsPermission: false,
+    defaultOn: false,
   },
 ];
 
@@ -66,9 +65,9 @@ export const SENSOR_BY_ID: Record<SensorId, SensorSpec> = Object.fromEntries(
   SENSORS.map((s) => [s.id, s]),
 ) as Record<SensorId, SensorSpec>;
 
-/** Todos apagados en una instalación nueva: son opt-in. */
+/** Lo que trae una instalación nueva: los sensores más útiles, activos. */
 export const DEFAULT_SENSORS: Record<SensorId, boolean> = Object.fromEntries(
-  SENSORS.map((s) => [s.id, false]),
+  SENSORS.map((s) => [s.id, s.defaultOn]),
 ) as Record<SensorId, boolean>;
 
 /** ¿Está este sensor activo? Respeta el interruptor general del monitor. */
@@ -87,7 +86,7 @@ export function activeSensors(settings: MonitorSettings): SensorId[] {
  * el contador de pasos exige permiso y el movimiento significativo no.
  */
 export interface SensorAvailability {
-  /** El móvil tiene el sensor (o, para alarma y audio, la API). */
+  /** El móvil tiene el sensor (o, para el audio, la API). */
   available: boolean;
   /** Falta un permiso para que funcione del todo. */
   needsPermission?: boolean;
@@ -100,8 +99,6 @@ export type SensorStatus = Record<SensorId, SensorAvailability>;
 export const NO_SENSORS: SensorStatus = {
   steps: { available: false, mode: 'none' },
   light: { available: false },
-  proximity: { available: false },
-  alarm: { available: false },
   audio: { available: false },
   posture: { available: false },
 };

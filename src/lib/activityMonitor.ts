@@ -2,7 +2,7 @@ import { App } from '@capacitor/app';
 import { Capacitor } from '@capacitor/core';
 import { HOUR, MINUTE, formatDuration, inWindow, parseTime } from './time';
 import { minuteDiff, type SleepHabit } from './habit';
-import { gatherEvidence, lastSustainedUse, LIT_FLAT_MAX_SHARE, quietEvidence, type GapEvidence, type RawEvent } from './rawEvents';
+import { firstSustainedUse, gatherEvidence, lastSustainedUse, unlocksIn, LIT_FLAT_MAX_SHARE, quietEvidence, type GapEvidence, type RawEvent } from './rawEvents';
 import { activeSensors } from './sensors';
 import { loadRaw, saveRaw } from './storage';
 import {
@@ -77,6 +77,8 @@ export interface DetectionResult {
    * fuera de tu hora»…
    */
   discards?: Array<{ reason: RejectedGap['reason']; start: number; end: number }>;
+  /** Desbloqueos dentro de la propuesta, según el registro bruto; sin registro, undefined. */
+  unlocks?: number;
 }
 
 /**
@@ -825,8 +827,11 @@ export function evaluateGaps(
     }
 
     const trimmed = trimGap(gap, habit);
-    let { start } = trimmed;
-    const { end } = trimmed;
+    let { start, end } = trimmed;
+    // El final nunca va después del primer uso sostenido que deja una noche
+    // entera por detrás: lo que viene luego es la mañana con el móvil en la mano.
+    const firstUse = ctx.events?.length ? firstSustainedUse(ctx.events, start + MIN_TAIL_MS, end) : null;
+    if (firstUse !== null && firstUse < end) end = firstUse;
     let inferred = trimmed.inferred;
 
     // El inicio nunca va antes del último uso real del móvil. Los huecos que no
@@ -882,6 +887,8 @@ export function evaluateGaps(
     habit,
     ctx.latencyMinutes,
   );
+  if (ctx.events?.length)
+    for (const r of fused) r.unlocks = unlocksIn(ctx.events, r.session.start, r.session.end);
   const merged: DetectionResult[] = [];
   for (const r of fused) {
     const { start, end } = r.session;
@@ -1043,9 +1050,16 @@ function pickMainNights(
  * cargador o «no molestar»; Doze es sólo la pantalla vista desde otro lado), o
  * con sensores, oscuridad y quietud totales.
  */
+/** Desbloqueos que aún caben en una siesta (mirar la hora una vez). */
+const NAP_MAX_UNLOCKS = 1;
+
 function napEvidence(r: DetectionResult): boolean {
   const triggers = new Set(r.session.triggers ?? []);
   const independent = (['screen', 'charger', 'dnd'] as TriggerId[]).filter((id) => triggers.has(id));
+  // Una siesta no se pasa desbloqueando el móvil: con datos reales, las tardes
+  // que el usuario negó traían 4-5 desbloqueos, y ninguna noche dormida tuvo
+  // más de uno dentro del sueño.
+  if (r.unlocks !== undefined && r.unlocks > NAP_MAX_UNLOCKS) return false;
   if (independent.length >= 2) return true;
   const ev = r.evidence;
   // Plano a plena luz es una mesa a la vista: ni siesta ni nada.

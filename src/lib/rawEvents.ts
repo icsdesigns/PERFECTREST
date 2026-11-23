@@ -111,6 +111,15 @@ export const LIGHT_DIM = 1;
 export const LIGHT_BRIGHT = 2;
 /** Lux a partir de los cuales hay luz de verdad (el mismo umbral que `LUX_BRIGHT` del servicio). */
 export const LUX_BRIGHT = 50;
+/**
+ * Lux a partir de los cuales un móvil plano boca arriba está en una habitación
+ * con la luz encendida, no en una cama a oscuras. Calibrado con 18 noches
+ * reales: dormido, las lecturas boca arriba dieron 0 lux (65 de 65 dentro de la
+ * noche); despierto en casa por la noche, la luz de la habitación dio 30-50 lux,
+ * que con el umbral de 50 contaban como «oscuro». Entre 1 y 49 lux no hubo
+ * ninguna lectura con el usuario dormido.
+ */
+export const LUX_LIT_FLAT = 10;
 
 /** Posturas que registra el servicio a partir de la gravedad y el vaivén del acelerómetro. */
 export const POSTURE_FLAT_UP = 0;
@@ -272,7 +281,7 @@ function episodes(events: RawEvent[], from: number, to: number, enabled: SensorI
         // Plano pero con luz: sobre una mesa a la vista, no en una cama a oscuras.
         // Cada lectura es una luz clara de unos minutos; dos seguidas cuentan como
         // un rato de luz encendida y mueven el inicio como cualquier luz que se apaga.
-        if (has('posture') && has('light') && (e.v ?? 0) >= LUX_BRIGHT)
+        if (has('posture') && has('light') && (e.v ?? 0) >= LUX_LIT_FLAT)
           spans.push({ from: e.at, to: e.at + POSTURE_SPAN_MS, weight: POSTURE_WEIGHT, light: true });
         break;
       case 'light':
@@ -417,7 +426,7 @@ export function gatherEvidence(
         const l = r.v === POSTURE_FLAT_UP ? luxOf(r.at) : undefined;
         if (l) {
           measured++;
-          if ((l.v ?? 0) >= LUX_BRIGHT) {
+          if ((l.v ?? 0) >= LUX_LIT_FLAT) {
             lit++;
             continue;
           }
@@ -509,6 +518,28 @@ const UNLOCK_SLACK_MS = 5_000;
  * empieza después, con su propio inicio.
  */
 export function lastSustainedUse(events: RawEvent[], from: number, to: number): number | null {
+  const uses = sustainedUses(events, from, to);
+  return uses.length ? uses[uses.length - 1].off : null;
+}
+
+/**
+ * Inicio del primer uso sostenido del móvil dentro de un tramo; null si no lo
+ * hubo. Es el final de la noche cuando el hueco se alargó más allá de él (el
+ * servicio no lo cerró, o el hueco viene de otro disparador): con datos reales,
+ * una mañana de desbloqueos, pasos y pantalla seguía contando como sueño hasta
+ * las 11:23 cuando el primer uso sostenido fue a las 08:14.
+ */
+export function firstSustainedUse(events: RawEvent[], from: number, to: number): number | null {
+  const uses = sustainedUses(events, from, to);
+  return uses.length ? uses[0].on : null;
+}
+
+/** Desbloqueos dentro de un tramo: cada uno es alguien despierto mirando el móvil. */
+export function unlocksIn(events: RawEvent[], from: number, to: number): number {
+  return events.filter((e) => e.kind === 'unlock' && e.at > from && e.at < to).length;
+}
+
+function sustainedUses(events: RawEvent[], from: number, to: number): Array<{ on: number; off: number }> {
   const stints: Array<{ on: number; off: number }> = [];
   let on: number | null = null;
   for (const e of events) {
@@ -528,7 +559,7 @@ export function lastSustainedUse(events: RawEvent[], from: number, to: number): 
   const unlocked = (s: { on: number; off: number }) => unlocks.some((u) => u >= s.on - UNLOCK_SLACK_MS && u <= s.off);
   const used = stints.filter(unlocked);
 
-  let last: number | null = null;
+  const out: Array<{ on: number; off: number }> = [];
   let cluster: Array<{ on: number; off: number }> = [];
   const close = () => {
     if (!cluster.length) return;
@@ -536,7 +567,7 @@ export function lastSustainedUse(events: RawEvent[], from: number, to: number): 
     const end = cluster[cluster.length - 1].off;
     const use = cluster.reduce((sum, s) => sum + (s.off - s.on), 0);
     const count = unlocks.filter((u) => u >= first - UNLOCK_SLACK_MS && u <= end).length;
-    if (use >= SUSTAINED_USE_MS || count >= SUSTAINED_UNLOCKS) last = end;
+    if (use >= SUSTAINED_USE_MS || count >= SUSTAINED_UNLOCKS) out.push({ on: first, off: end });
     cluster = [];
   };
   for (const s of used) {
@@ -544,5 +575,5 @@ export function lastSustainedUse(events: RawEvent[], from: number, to: number): 
     cluster.push(s);
   }
   close();
-  return last;
+  return out;
 }

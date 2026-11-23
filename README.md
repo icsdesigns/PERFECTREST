@@ -188,6 +188,28 @@ cada notificación pueden dar lecturas que no son lo que parecen, y por eso una
 lectura aislada nunca mueve nada. Boca abajo la luz marca «oscuro» siempre, así
 que la oscuridad de ese sensor no se corrige por la postura.
 
+*Calibrado con 18 noches reales* ([`scripts/rawbacktest.ts`](scripts/rawbacktest.ts),
+`PERFECTREST_EXPORT=/ruta/export.json npm run check`). Con un export de la app
+(registro bruto incluido) y la verdad que deja el comentario de cada noche:
+
+- **Plano con luz desde 10 lux, no 50.** Dormido, las lecturas boca arriba
+  dieron 0 lux en 65 de 65; despierto en casa por la noche, la luz de la
+  habitación daba 30-50 lux y contaba como oscuridad. Ninguna lectura entre 1 y
+  49 lux con el usuario dormido (`LUX_LIT_FLAT`).
+- **Una siesta no se pasa desbloqueando el móvil.** Las tardes que el usuario
+  negó traían 4-5 desbloqueos dentro; ninguna noche dormida tuvo más de uno. Con
+  más de uno (`NAP_MAX_UNLOCKS`) el hueco de fuera de hora no se propone como siesta.
+- **El final no pasa del primer uso sostenido** que deja una noche entera por
+  detrás (`firstSustainedUse`): una mañana de desbloqueos y pasos seguía
+  contando como sueño hasta las 11:23 cuando el primer uso fue a las 08:14.
+- El boca abajo es la postura del sueño en este usuario (88 % de las lecturas
+  dormido) y «en bolsillo/mano» casi no aparece dormido (5 de 665).
+
+Resultado sobre las 16 noches con verdad: error medio del inicio de 3 min, la
+siesta falsa descartada y la noche del 13/11 (que la versión que la detectó
+empezaba a las 21:39) empieza a las 00:26 con la luz y la postura, frente a las
+00:00 reales.
+
 **Una noche no llega entera.** Ni el servicio ni la capa web pueden dar por
 buena la primera señal de vuelta que reciben, porque durante la noche llegan
 muchas que no lo son: Android sale de Doze cada pocas horas a su ventana de

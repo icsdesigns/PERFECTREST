@@ -63,8 +63,8 @@ check('Ajustes', wrap(<SettingsScreen />), [
   // desaparece de Ajustes, el diagnóstico vuelve a ser un callejón sin salida.
   'Registro de detección',
   'Probar un disparador',
-  'Reposo profundo del sistema',
-  'Modo «No molestar»',
+  'Bloqueo y desbloqueo del móvil',
+  'Poner el móvil a cargar',
   // La privacidad del contexto: el interruptor y el borrado tienen que estar a la vista.
   'Guardar contexto del dispositivo con cada noche',
   'Nunca ubicación',
@@ -107,8 +107,7 @@ const withContext: SleepSession = {
     now: demo.end + 3_600_000,
     sensorsOn: [],
     events: [
-      { at: demo.start - 3_600_000, kind: 'batt', v: 80 },
-      { at: demo.start - 3_600_000, kind: 'net', v: 1 },
+      { at: demo.start - 3_600_000, kind: 'chg-type', v: 1 },
       { at: demo.start + 3_600_000, kind: 'unlock' },
     ],
     device: buildDevice({ start: demo.start, appVersion: '1.0.0', snapshot: { device: { model: 'Pixel 8', sdk: 34, release: '14' } } }),
@@ -116,7 +115,7 @@ const withContext: SleepSession = {
 };
 check('Hoja de sesión con contexto del dispositivo',
   <SessionSheet session={withContext} onSave={() => {}} onClose={() => {}} />,
-  ['Contexto del dispositivo', '<details', 'Pixel 8', 'Batería y carga', 'Wi-Fi', 'sin ubicación']);
+  ['Contexto del dispositivo', '<details', 'Pixel 8', 'Carga', 'cargador de pared', 'sin ubicación']);
 check('Hoja de sesión sin contexto: no muestra la sección (sesiones anteriores a la función)',
   <SessionSheet session={demo} onSave={() => {}} onClose={() => {}} />, ['Confirma esta noche']);
 {

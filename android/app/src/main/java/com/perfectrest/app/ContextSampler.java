@@ -1,6 +1,5 @@
 package com.perfectrest.app;
 
-import android.app.AlarmManager;
 import android.app.NotificationManager;
 import android.content.Context;
 import android.content.Intent;
@@ -28,10 +27,12 @@ import java.util.TimeZone;
  * Muestreo ligero del estado del dispositivo para el contexto de cada noche.
  *
  * Los disparadores y los sensores dicen cuándo se usa el móvil y qué pasa a su
- * alrededor; esto anota el resto de parámetros del sistema que ayudan a
- * entender por qué una noche salió como salió: batería y carga, red, modo
- * avión, timbre, ahorro de energía, «no molestar», Doze, Bluetooth de audio,
- * brillo y orientación. Los eventos van al registro bruto ({@link
+ * alrededor; esto anota el tipo de carga, que con datos reales marca cuándo
+ * se acuesta el usuario (enchufa el móvil justo antes de dormir). El resto de
+ * parámetros del sistema que se muestreaban antes (batería, red, modo avión,
+ * timbre, ahorro, «no molestar», Doze, Bluetooth, brillo, orientación) no
+ * decían nada del sueño y sólo se leen ya en la instantánea de Ajustes
+ * ({@link #snapshot}). Los eventos van al registro bruto ({@link
  * RawEventLog}) y la capa web los resume por noche (`sessionContext.ts`).
  *
  * Es barato por construcción:
@@ -75,11 +76,6 @@ final class ContextSampler {
     static final long MIN_SPACING_MS = 3 * 60_000L;
     /** Un valor sin cambios se vuelve a anotar pasado este tiempo (lectura de refresco). */
     static final long REFRESH_MS = 6 * 60 * 60_000L;
-
-    /** Cambios mínimos para anotar un valor continuo: batería 5 puntos, temperatura 2 °C, brillo 10 puntos. */
-    private static final long TOL_BATTERY = 4;
-    private static final long TOL_TEMP = 19;
-    private static final long TOL_BRIGHT = 9;
 
     private static final Object LOCK = new Object();
     /** Última lectura anotada de cada tipo: {valor, instante}. */
@@ -244,76 +240,18 @@ final class ContextSampler {
             if (!force && now - lastSampleAt < MIN_SPACING_MS) return;
             lastSampleAt = now;
 
-            boolean chargeChanged = false;
+            // Sólo el tipo de carga: enchufar al acostarse marca el inicio de la
+            // noche. Batería, temperatura, red, modo avión, timbre, ahorro, Doze,
+            // «no molestar», Bluetooth, brillo y orientación se dejaron de
+            // muestrear: con 18 noches reales ninguno decía nada del sueño.
             try {
                 Intent battery = batteryIntent(context);
                 if (battery != null) {
                     int plugged = battery.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0);
-                    long[] before = LAST.get("chg-type");
-                    int code = chargeCode(plugged);
-                    chargeChanged = before == null || before[0] != code;
-                    log(context, "chg-type", code, now, 0);
-                    int pct = batteryPct(
-                        battery.getIntExtra(BatteryManager.EXTRA_LEVEL, -1),
-                        battery.getIntExtra(BatteryManager.EXTRA_SCALE, -1));
-                    // Al enchufar o desenchufar se anota el nivel aunque no haya cambiado 5 puntos.
-                    log(context, "batt", pct, now, chargeChanged ? -1 : TOL_BATTERY);
-                    int temp = battery.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, -1);
-                    if (temp > 0) log(context, "batt-temp", temp, now, TOL_TEMP);
+                    log(context, "chg-type", chargeCode(plugged), now, 0);
                 }
             } catch (RuntimeException ignored) {
                 // Sin batería legible, esa parte del contexto queda vacía.
-            }
-
-            try {
-                log(context, "net", network(context), now, 0);
-            } catch (RuntimeException ignored) {
-                // Falta ACCESS_NETWORK_STATE o el sistema no responde.
-            }
-            try {
-                log(context, "airplane", Settings.Global.getInt(
-                    context.getContentResolver(), Settings.Global.AIRPLANE_MODE_ON, 0), now, 0);
-            } catch (RuntimeException ignored) {
-                // Ajuste no disponible.
-            }
-            try {
-                AudioManager audio = (AudioManager) context.getSystemService(Context.AUDIO_SERVICE);
-                if (audio != null) log(context, "ringer", audio.getRingerMode(), now, 0);
-            } catch (RuntimeException ignored) {
-                // Sin timbre legible.
-            }
-            try {
-                PowerManager power = (PowerManager) context.getSystemService(Context.POWER_SERVICE);
-                if (power != null) {
-                    log(context, "powersave", power.isPowerSaveMode() ? 1 : 0, now, 0);
-                    log(context, "doze", power.isDeviceIdleMode() ? 1 : 0, now, 0);
-                }
-            } catch (RuntimeException ignored) {
-                // Sin estado de energía.
-            }
-            try {
-                NotificationManager nm = (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
-                if (nm != null) {
-                    int filter = nm.getCurrentInterruptionFilter();
-                    if (filter > 0) log(context, "dnd-mode", filter, now, 0);
-                }
-            } catch (RuntimeException ignored) {
-                // Sin filtro de interrupciones legible.
-            }
-            try {
-                log(context, "bt", bluetoothAudio(context), now, 0);
-            } catch (RuntimeException ignored) {
-                // Sin salidas de audio.
-            }
-            try {
-                log(context, "bright", brightness(context), now, TOL_BRIGHT);
-            } catch (RuntimeException ignored) {
-                // Ajuste no disponible.
-            }
-            try {
-                log(context, "orient", orientation(context), now, 0);
-            } catch (RuntimeException ignored) {
-                // Sin configuración legible.
             }
         }
     }
@@ -397,15 +335,6 @@ final class ContextSampler {
             }
         } catch (RuntimeException ignored) {
             // Sin audio.
-        }
-        try {
-            AlarmManager alarms = (AlarmManager) context.getSystemService(Context.ALARM_SERVICE);
-            if (alarms != null) {
-                AlarmManager.AlarmClockInfo next = alarms.getNextAlarmClock();
-                state.put("nextAlarm", next == null ? 0L : next.getTriggerTime());
-            }
-        } catch (RuntimeException ignored) {
-            // Sin alarma legible.
         }
         state.put("airplane", sysInt(context, true, Settings.Global.AIRPLANE_MODE_ON, 0) != 0);
         // «bluetooth_on» es un ajuste global legible sin permisos; no dice con qué se empareja.

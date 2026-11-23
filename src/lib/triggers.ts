@@ -6,16 +6,14 @@ import type { MonitorSettings, TriggerId } from './types';
  * Cada disparador es una señal independiente de que el usuario ha dejado de
  * usar el dispositivo y ha vuelto a él. Se activan por separado desde Ajustes
  * porque no todos encajan con todo el mundo: quien no carga el móvil de noche
- * no quiere la señal del cargador, y quien duerme sin bloqueo de pantalla
- * necesita apoyarse en el horario.
+ * no quiere la señal del cargador.
  *
  * `native` marca los que dependen del servicio en segundo plano del APK: en el
  * navegador se muestran como no disponibles y nunca se evalúan.
  *
  * Tener varios activos no es redundancia: cada uno se rompe por su lado. La
- * pantalla no sirve a quien duerme sin bloqueo, el cargador no sirve a quien
- * no carga de noche, y el reposo del sistema no llega si el móvil recibe
- * notificaciones sin parar. Lo que uno pierde, otro lo cubre, y cuando dos
+ * pantalla no sirve a quien duerme sin bloqueo y el cargador no sirve a quien
+ * no carga de noche. Lo que uno pierde, otro lo cubre, y cuando dos
  * coinciden sobre la misma noche la propuesta sube de confianza.
  */
 
@@ -52,36 +50,12 @@ export const TRIGGERS: TriggerSpec[] = [
     directness: 2,
   },
   {
-    id: 'idle',
-    label: 'Reposo profundo del sistema',
-    hint: 'Android entra en modo Doze cuando el móvil lleva un rato quieto y sin usarse, y sale al cogerlo. No depende de que bloquees la pantalla.',
-    native: true,
-    defaultOn: true,
-    directness: 2,
-  },
-  {
-    id: 'dnd',
-    label: 'Modo «No molestar»',
-    hint: 'Si lo activas al acostarte —o lo hace por ti el modo descanso del móvil— marca la noche entera. Es la señal más clara de intención de dormir.',
-    native: true,
-    defaultOn: false,
-    directness: 2,
-  },
-  {
     id: 'appOpen',
     label: 'Apertura de la app',
     hint: 'El hueco entre dos veces que abres PerfectRest. Es lo único que funciona en el navegador, y el respaldo si Android para el servicio.',
     native: false,
     defaultOn: true,
     directness: 1,
-  },
-  {
-    id: 'schedule',
-    label: 'Tu horario objetivo',
-    hint: 'Si una noche no deja ninguna señal, propone la sesión que marca tu meta para que la corrijas. Siempre con confianza baja.',
-    native: false,
-    defaultOn: false,
-    directness: 0,
   },
 ];
 
@@ -99,12 +73,15 @@ export const DEFAULT_TRIGGERS: Record<TriggerId, boolean> = Object.fromEntries(
  */
 export function triggerEnabled(settings: MonitorSettings, id: TriggerId): boolean {
   if (!settings.enabled) return false;
-  return settings.triggers?.[id] ?? TRIGGER_BY_ID[id].defaultOn;
+  // Un disparador retirado (de un hueco o una sesión antiguos) ya no está activo.
+  const spec = TRIGGER_BY_ID[id];
+  if (!spec) return false;
+  return settings.triggers?.[id] ?? spec.defaultOn;
 }
 
 /** Ordena por lo directa que es la señal: primero la más fiable. */
 export function sortTriggers(ids: TriggerId[]): TriggerId[] {
-  return [...new Set(ids)].sort(
+  return [...new Set(ids)].filter((id) => id in TRIGGER_BY_ID).sort(
     (a, b) => TRIGGER_BY_ID[b].directness - TRIGGER_BY_ID[a].directness,
   );
 }
@@ -113,14 +90,12 @@ export function sortTriggers(ids: TriggerId[]): TriggerId[] {
 export const TRIGGER_SHORT: Record<TriggerId, string> = {
   screen: 'pantalla',
   charger: 'cargador',
-  idle: 'reposo',
-  dnd: 'no molestar',
   appOpen: 'app',
-  schedule: 'horario',
 };
 
 /** "pantalla + cargador" para la ficha de la sesión. */
 export function describeTriggers(ids: TriggerId[] | undefined): string | null {
   if (!ids || !ids.length) return null;
-  return sortTriggers(ids).map((id) => TRIGGER_SHORT[id]).join(' + ');
+  const known = sortTriggers(ids);
+  return known.length ? known.map((id) => TRIGGER_SHORT[id]).join(' + ') : null;
 }

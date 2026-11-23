@@ -6,7 +6,7 @@
  *   hábito y latencia  aprendidos de las noches corregidas
  *   una noche por día  la tarde y la mañana de después no son sueño
  *   micro-despertares  recortan el hueco por ambos extremos
- *   sensores           pasos, luz, audio y alarma afinan los bordes
+ *   sensores           pasos, luz, audio y postura afinan los bordes
  *
  *   npm run check
  */
@@ -14,7 +14,6 @@ import {
   MAX_PLAUSIBLE_SLEEP_MS,
   evaluateGap,
   evaluateGaps,
-  proposeFromSchedule,
   withDiscards,
   refineEdges,
   supersedesPending,
@@ -89,6 +88,8 @@ function assert(name: string, cond: boolean, extra?: unknown) {
 const at = (iso: string) => new Date(iso).getTime();
 const clock = (ts: number) => new Date(ts).toTimeString().slice(0, 5);
 
+/** Todos los sensores apagados: la base de las pruebas, que enciende sólo los que mira. */
+const SENSORS_OFF = Object.fromEntries(Object.keys(DEFAULT_SENSORS).map((k) => [k, false])) as typeof DEFAULT_SENSORS;
 const MON: MonitorSettings = {
   enabled: true,
   minGapMinutes: 180,
@@ -99,7 +100,7 @@ const MON: MonitorSettings = {
   background: true,
   wakeSummary: true,
   triggers: { ...DEFAULT_TRIGGERS },
-  sensors: { ...DEFAULT_SENSORS },
+  sensors: { ...SENSORS_OFF },
   saveContext: true,
   contextSince: 0,
 };
@@ -470,7 +471,7 @@ console.log('\n--- Precisión: sensores ---');
 {
   const on = (...ids: Array<keyof typeof DEFAULT_SENSORS>) => ({
     ...MON,
-    sensors: { ...DEFAULT_SENSORS, ...Object.fromEntries(ids.map((i) => [i, true])) },
+    sensors: { ...SENSORS_OFF, ...Object.fromEntries(ids.map((i) => [i, true])) },
   });
   const habit = { startMin: 0, endMin: 8 * 60, n: 8 };
   const ev = (iso: string, kind: RawEvent['kind'], v?: number): RawEvent => ({ at: at(iso), kind, v });
@@ -525,6 +526,8 @@ console.log('\n--- Precisión: sensores ---');
   assert('con los sensores apagados la misma noche conserva los bordes del móvil',
     plain.results.length === 1 && clock(plain.results[0].session.start) === '22:10');
   assert('sin sensores activos no se consulta el registro', activeSensors(MON).length === 0);
+  assert('de fábrica vienen activos postura, pasos y luz (los más útiles con noches reales); el audio no',
+    DEFAULT_SENSORS.posture && DEFAULT_SENSORS.steps && DEFAULT_SENSORS.light && !DEFAULT_SENSORS.audio, DEFAULT_SENSORS);
   assert('con sensores y quietud total la confianza no baja respecto a sin ellos',
     (r.results[0].score ?? 0) >= (plain.results[0].score ?? 1) - 0.0001, [r.results[0].score, plain.results[0].score]);
 
@@ -546,24 +549,11 @@ console.log('\n--- Precisión: sensores ---');
     ea.activityAt !== null && clock(ea.activityAt) >= '00:30' && clock(ea.activityAt) <= '00:45',
     ea.activityAt && clock(ea.activityAt));
 
-  // La alarma de las 07:00 sonó (pantalla encendida) y el móvil no se desbloqueó hasta las 10:40.
-  const alarm: RawEvent[] = [
-    ev('2026-09-21T23:55:00', 'alarm', at('2026-09-22T07:00:00')),
-    ev('2026-09-22T07:00:02', 'screen-on'),
-  ];
-  const al = gatherEvidence(alarm, at('2026-09-21T23:50:00'), at('2026-09-22T10:40:00'), ['alarm']);
-  assert('una alarma que sonó con la pantalla encendida marca el despertar',
-    al.alarmAt === at('2026-09-22T07:00:00') && al.wakeAt === al.alarmAt, al);
-  const alOk = gatherEvidence(alarm, at('2026-09-21T23:50:00'), at('2026-09-22T07:20:00'), ['alarm']);
-  assert('y una alarma junto al final corrobora la noche', alOk.alarmMatch === true);
-  const noAlarm = gatherEvidence([ev('2026-09-21T12:00:00', 'alarm', 0)], at('2026-09-21T23:50:00'), at('2026-09-22T07:20:00'), ['alarm']);
-  assert('sin alarma programada no hay indicio (ni a favor)', noAlarm.alarmMatch === false && noAlarm.alarmAt === null);
-
   // Una siesta a oscuras y quieta, sin cargador, con sensores: tiene indicios propios.
-  const darkNap: RawEvent[] = [ev('2026-09-23T13:30:00', 'light', LIGHT_DARK), ev('2026-09-23T13:40:00', 'proximity', 1)];
+  const darkNap: RawEvent[] = [ev('2026-09-23T13:30:00', 'light', LIGHT_DARK)];
   const two = evaluateGaps(
     [gap('2026-09-22T23:30:00', '2026-09-23T07:30:00'), gap('2026-09-23T14:00:00', '2026-09-23T18:40:00')],
-    on('light', 'proximity'),
+    on('light'),
     { habit, events: darkNap },
   );
   assert('una siesta a oscuras y quieta se acepta como siesta',
@@ -577,7 +567,7 @@ console.log('\n--- Precisión: postura del móvil ---');
 {
   const on = (...ids: Array<keyof typeof DEFAULT_SENSORS>) => ({
     ...MON,
-    sensors: { ...DEFAULT_SENSORS, ...Object.fromEntries(ids.map((i) => [i, true])) },
+    sensors: { ...SENSORS_OFF, ...Object.fromEntries(ids.map((i) => [i, true])) },
   });
   const habit = { startMin: 0, endMin: 8 * 60, n: 8 };
   /** Una lectura cada 10 min entre dos instantes, todas con la misma postura. */
@@ -710,15 +700,14 @@ console.log('\n--- Precisión: postura del móvil ---');
   // Una siesta de día: plano a oscuras se acepta; plano a la luz de una oficina, no.
   const napEvents = (lux: number): RawEvent[] => [
     { at: at('2026-09-23T13:30:00'), kind: 'light', v: LIGHT_DARK },
-    { at: at('2026-09-23T13:40:00'), kind: 'proximity', v: 1 },
     ...flatWithLux('2026-09-23T14:00:00', '2026-09-23T18:30:00', lux),
   ];
   const napGaps = [gap('2026-09-22T23:30:00', '2026-09-23T07:30:00'), gap('2026-09-23T14:00:00', '2026-09-23T18:40:00')];
-  const dayDark = evaluateGaps(napGaps, on('light', 'proximity', 'posture'), { habit, events: napEvents(1) });
+  const dayDark = evaluateGaps(napGaps, on('light', 'posture'), { habit, events: napEvents(1) });
   assert('de día, plano y a oscuras: se propone como siesta',
     dayDark.results.length === 2 && !!dayDark.results[1].session.nap,
     dayDark.results.map((x) => `${clock(x.session.start)} ${x.session.nap}`));
-  const dayOffice = evaluateGaps(napGaps, on('light', 'proximity', 'posture'), { habit, events: napEvents(400) });
+  const dayOffice = evaluateGaps(napGaps, on('light', 'posture'), { habit, events: napEvents(400) });
   assert('de día, plano a plena luz (mesa de oficina): no es una siesta',
     dayOffice.results.length === 1, dayOffice.results.map((x) => `${clock(x.session.start)} ${x.session.nap}`));
 }
@@ -729,7 +718,7 @@ console.log('\n--- Precisión: el reloj no inventa sueño ---');
 {
   const on = (...ids: Array<keyof typeof DEFAULT_SENSORS>) => ({
     ...MON,
-    sensors: { ...DEFAULT_SENSORS, ...Object.fromEntries(ids.map((i) => [i, true])) },
+    sensors: { ...SENSORS_OFF, ...Object.fromEntries(ids.map((i) => [i, true])) },
   });
   const habit = { startMin: 0, endMin: 8 * 60, n: 8 };
   const readings = (from: string, to: string, v: number): RawEvent[] => {
@@ -832,17 +821,6 @@ console.log('\n--- Precisión: el reloj no inventa sueño ---');
     supersedesPending(incomingSolid, pendingInferred));
   assert('pero una inferida no sustituye a otra medida de confianza baja',
     !supersedesPending(pendingInferred, incomingSolid));
-
-  // El disparador de horario sigue siendo el último recurso: baja e inferida.
-  const sched = proposeFromSchedule(
-    flat,
-    { ...MON, triggers: { ...DEFAULT_TRIGGERS, schedule: true } },
-    [],
-    null,
-    at('2026-09-22T12:00:00'),
-  );
-  assert('la propuesta del horario es de confianza baja y se marca inferida',
-    !!sched && sched.result.session.confidence === 'low' && sched.result.session.inferred === true && sched.result.inferred === true);
 }
 
 // --- Uso sostenido del móvil dentro de un hueco -----------------------------
@@ -949,27 +927,18 @@ console.log('\n--- Precisión: contexto del dispositivo ---');
   const now = at('2026-09-22T09:30:00');
   const night: RawEvent[] = [
     // Estado de la tarde (lecturas de refresco del servicio).
-    ev('2026-09-21T22:00:00', 'batt', 80), ev('2026-09-21T22:00:00', 'chg-type', 0), ev('2026-09-21T22:00:00', 'net', 1),
-    ev('2026-09-21T22:00:00', 'airplane', 0), ev('2026-09-21T22:00:00', 'ringer', 2), ev('2026-09-21T22:00:00', 'powersave', 0),
-    ev('2026-09-21T22:00:00', 'dnd-mode', 1), ev('2026-09-21T22:00:00', 'bt', 0), ev('2026-09-21T22:00:00', 'bright', 40),
-    ev('2026-09-21T22:00:00', 'orient', 1), ev('2026-09-21T22:00:00', 'batt-temp', 310),
+    ev('2026-09-21T22:00:00', 'chg-type', 0),
     // Uso del móvil antes de acostarse: 25 min.
     ev('2026-09-21T22:55:00', 'screen-on'), ev('2026-09-21T22:55:02', 'unlock'), ev('2026-09-21T23:20:00', 'screen-off'),
     ev('2026-09-21T22:50:00', 'light', LIGHT_BRIGHT), ev('2026-09-21T22:50:00', 'lux', 300),
     ev('2026-09-21T23:00:00', 'audio', 1), ev('2026-09-21T23:10:00', 'audio', 1), ev('2026-09-21T23:20:00', 'audio', 1),
     ev('2026-09-21T23:25:00', 'audio', 0),
     ev('2026-09-21T23:21:00', 'light', LIGHT_DARK), ev('2026-09-21T23:21:00', 'lux', 0),
-    ev('2026-09-21T23:10:00', 'alarm', at('2026-09-22T07:00:00')),
-    // Se enchufa y se silencia.
-    ev('2026-09-21T23:22:00', 'plug'), ev('2026-09-21T23:22:00', 'chg-type', 2), ev('2026-09-21T23:22:00', 'batt', 79),
-    ev('2026-09-21T23:25:00', 'dnd-mode', 2), ev('2026-09-21T23:25:00', 'ringer', 1),
-    ev('2026-09-22T01:00:00', 'airplane', 1), ev('2026-09-22T05:30:00', 'airplane', 0),
-    ev('2026-09-22T02:00:00', 'net', 0), ev('2026-09-22T06:00:00', 'net', 1),
-    ev('2026-09-22T01:30:00', 'batt-temp', 360),
+    // Se enchufa.
+    ev('2026-09-21T23:22:00', 'plug'), ev('2026-09-21T23:22:00', 'chg-type', 2),
     // Un vistazo sin desbloquear y un micro-despertar de dos minutos.
     ev('2026-09-22T03:10:00', 'screen-on'), ev('2026-09-22T03:10:08', 'screen-off'),
     ev('2026-09-22T04:00:00', 'screen-on'), ev('2026-09-22T04:00:03', 'unlock'), ev('2026-09-22T04:02:00', 'screen-off'),
-    ev('2026-09-22T05:00:00', 'batt', 95),
     ev('2026-09-22T06:30:00', 'light', LIGHT_DIM),
     ev('2026-09-22T02:00:00', 'posture', POSTURE_FLAT_UP), ev('2026-09-22T02:10:00', 'posture', POSTURE_FLAT_DOWN),
     ev('2026-09-22T02:20:00', 'posture', POSTURE_FLAT_UP), ev('2026-09-22T02:30:00', 'posture', POSTURE_CARRIED),
@@ -998,52 +967,33 @@ console.log('\n--- Precisión: contexto del dispositivo ---');
   const pow = ctx.power!;
   assert('carga: enchufado una vez y desenchufado una, casi toda la noche',
     pow.plugs === 1 && pow.unplugs === 1 && pow.chargingPct !== null && pow.chargingPct >= 84 && pow.chargingPct <= 90, pow);
-  assert('batería: al dormirse 80 %, al despertar 95 %', pow.battery?.start === 80 && pow.battery?.end === 95 && pow.battery?.max === 95, pow.battery);
-  assert('batería: temperatura máxima en °C', pow.tempC?.max === 36 && pow.tempC?.min === 31, pow.tempC);
+  assert('batería y temperatura ya no se resumen',
+    !('battery' in pow) && !('tempC' in pow), pow);
   assert('carga: tipo USB tras enchufar, sin carga al desenchufar', pow.chargeType?.end === 0 && pow.chargeType?.pct?.['2'] !== undefined, pow.chargeType);
 
-  const sys = ctx.system!;
-  assert('red: Wi-Fi al inicio y al final, y unas cuatro horas sin conexión',
-    sys.net?.start === 1 && sys.net?.end === 1 && (sys.net.pct?.['0'] ?? 0) >= 40 && (sys.net.pct?.['0'] ?? 0) <= 50, sys.net);
-  assert('modo avión: la mitad del tramo', (sys.airplane?.pct?.['1'] ?? 0) >= 48 && (sys.airplane?.pct?.['1'] ?? 0) <= 54, sys.airplane);
-  assert('no molestar pasa de «todo» a «prioritarias»; el timbre, de normal a vibrar',
-    sys.dnd?.start === 1 && sys.dnd?.end === 2 && sys.ringer?.start === 2 && sys.ringer?.end === 1);
-  assert('brillo y orientación al dormirse', sys.bright?.start === 40 && sys.orient?.start === 1);
-  assert('los parámetros sin datos no aparecen (no hay Doze ni ahorro de energía anotado en la noche)',
-    sys.doze === undefined && sys.powerSave?.pct?.['0'] === 100, sys);
+  assert('red, modo avión, timbre, no molestar, Doze, Bluetooth, brillo y orientación ya no se resumen',
+    !('system' in ctx), ctx);
 
   const sen = ctx.sensors!;
-  assert('sensores: sólo los activos para detectar (pasos, luz, postura); proximidad no',
-    sen.on.join() === 'steps,light,posture' && sen.proximity === undefined && sen.steps?.steps === 12);
+  assert('sensores: sólo los activos para detectar (pasos, luz, postura)',
+    sen.on.join() === 'steps,light,posture' && sen.steps?.steps === 12);
   assert('luz: la mayor parte oscuro, con los lux de los cambios',
     sen.light !== undefined && sen.light.pct.dark >= 78 && sen.light.luxMax === 300 && sen.light.luxMin === 0, sen.light);
   assert('postura: 4 lecturas, 75 % plano', sen.posture?.readings === 4 && sen.posture?.flatPct === 75, sen.posture);
   assert('audio (aunque no sea sensor activo): una reproducción, el 5 % del tramo',
     sen.audio?.starts === 1 && sen.audio.playingPct >= 4 && sen.audio.playingPct <= 6, sen.audio);
-  assert('alarma: sonó a las 7:00, diez minutos antes de despertar, con la pantalla encendida',
-    sen.alarm?.status === 'rang' && sen.alarm.deltaMin === -10 && sen.alarm.setAtStart === true, sen.alarm);
-
-  // La alarma cancelada: la hora cambia antes de que llegue.
-  const cancelled = buildContext({
-    start, end, now, sensorsOn: [], events: [
-      ev('2026-09-21T23:21:00', 'alarm', at('2026-09-22T07:00:00')),
-      ev('2026-09-22T02:00:00', 'alarm', 0),
-      ev('2026-09-22T07:00:05', 'screen-on'),
-    ],
-  });
-  assert('alarma cancelada antes de sonar', cancelled.sensors?.alarm?.status === 'cancelled', cancelled.sensors?.alarm);
+  assert('la alarma ya no se resume', !('alarm' in sen), sen);
   const future = buildContext({ start, end, now: end - HOUR, sensorsOn: [], events: night });
-  assert('si aún no ha llegado su hora, la alarma queda pendiente y el tramo se corta en el presente',
-    future.sensors?.alarm?.status === 'pending' && future.to === end - HOUR);
+  assert('si el despertar aún no ha llegado, el tramo se corta en el presente', future.to === end - HOUR);
 
   assert('línea de tiempo acotada y en minutos desde el inicio',
     (ctx.timeline?.length ?? 0) > 0 && ctx.timeline!.length <= 40 && ctx.timeline!.some((t) => t[1] === 'plug' && t[0] === 2), ctx.timeline);
 
   // Tamaño y privacidad.
   const big: RawEvent[] = [];
-  const kinds: RawEvent['kind'][] = ['unlock', 'screen-on', 'screen-off', 'net', 'batt', 'bt', 'steps', 'light', 'posture', 'audio', 'alarm', 'ringer'];
+  const kinds: RawEvent['kind'][] = ['unlock', 'screen-on', 'screen-off', 'chg-type', 'plug', 'lux', 'steps', 'light', 'posture', 'audio', 'posture-lux', 'unplug'];
   for (let i = 0; i < 3000; i++) big.push({ at: start - HOUR + i * 9_000, kind: kinds[i % kinds.length], v: i % 3 });
-  const huge = buildContext({ start, end, events: big, now, sensorsOn: ['steps', 'light', 'proximity', 'posture', 'audio', 'alarm'] });
+  const huge = buildContext({ start, end, events: big, now, sensorsOn: ['steps', 'light', 'posture', 'audio'] });
   assert(`con 3000 eventos el contexto sigue por debajo de ${MAX_CONTEXT_BYTES} bytes`,
     JSON.stringify(huge).length < MAX_CONTEXT_BYTES, JSON.stringify(huge).length);
   assert('un contexto normal ocupa unos pocos cientos de bytes', JSON.stringify(ctx).length < 3500, JSON.stringify(ctx).length);
@@ -1060,12 +1010,12 @@ console.log('\n--- Precisión: contexto del dispositivo ---');
   // Sin registro: igualmente un contexto, marcado como parcial.
   const empty = buildContext({ start, end, events: [], now, sensorsOn: [] });
   assert('sin registro bruto hay contexto parcial y sin secciones inventadas',
-    empty.partial === true && empty.screen === undefined && empty.power === undefined && empty.system === undefined);
+    empty.partial === true && empty.screen === undefined && empty.power === undefined);
   const late = buildContext({ start, end, events: night.filter((e) => e.at > start + 2 * HOUR), now, sensorsOn: [] });
   assert('si el registro empieza tarde, parcial', late.partial === true);
 
   // summarizeState en sí.
-  const net: RawEvent[] = [ev('2026-09-21T22:00:00', 'net', 1), ev('2026-09-21T23:00:00', 'net', 0)];
+  const net: RawEvent[] = [ev('2026-09-21T22:00:00', 'chg-type', 1), ev('2026-09-21T23:00:00', 'chg-type', 0)];
   const sm = summarizeState(net, at('2026-09-21T22:30:00'), at('2026-09-21T23:30:00'), at('2026-09-21T22:45:00'), at('2026-09-21T23:15:00'), true)!;
   assert('summarizeState: reparto, inicio, fin y cambios', sm.start === 1 && sm.end === 0 && sm.changes === 1 && sm.pct?.['1'] === 50 && sm.pct?.['0'] === 50, sm);
   assert('summarizeState: sin eventos no hay resumen', summarizeState([], 0, 10, 0, 10, true) === undefined);
@@ -1096,7 +1046,7 @@ console.log('\n--- Precisión: traza del algoritmo en el contexto ---');
   const algo = buildAlgo({
     result: {
       session: refined, gapMs: 8 * HOUR, score: 0.456,
-      evidence: { activityAt: start, wakeAt: null, dark: 0.912, moves: 0, flat: null, alarmAt: null, alarmMatch: true, sensors: ['light'] },
+      evidence: { activityAt: start, wakeAt: null, dark: 0.912, moves: 0, flat: null, litFlat: null, sensors: ['light'] },
       discards: [{ reason: 'secondary', start: end + HOUR, end: end + 4 * HOUR }],
     },
     refined, habit: { startMin: 23 * 60 + 40, endMin: 7 * 60, n: 6, spreadMin: 14.4 },
@@ -1158,7 +1108,7 @@ console.log('\n--- Precisión: exportación del contexto ---');
   const start = at('2026-09-21T23:20:00');
   const end = at('2026-09-22T07:10:00');
   const events: RawEvent[] = [
-    { at: start - HOUR, kind: 'batt', v: 80 }, { at: start - HOUR, kind: 'net', v: 1 },
+    { at: start - HOUR, kind: 'chg-type', v: 1 },
     { at: start + HOUR, kind: 'unlock' }, { at: start + HOUR, kind: 'screen-on' }, { at: start + HOUR + 60_000, kind: 'screen-off' },
   ];
   const context = buildContext({
@@ -1173,17 +1123,18 @@ console.log('\n--- Precisión: exportación del contexto ---');
   assert('CSV: después van inferida, inicio_habitual y las columnas del contexto',
     header[9] === 'inferida' && header[10] === 'inicio_habitual' && header.length === 11 + CONTEXT_COLUMNS.length, header.length);
   const col = (row: string, name: string) => row.split(',')[header.indexOf(name)];
-  assert('CSV: la noche con contexto lleva modelo, batería y desbloqueos', col(csv[2], 'ctx_modelo') === 'Pixel 8' && col(csv[2], 'bateria_inicio') === '80' && col(csv[2], 'pantalla_desbloqueos') === '1', csv[2]);
+  assert('CSV: la noche con contexto lleva modelo, carga y desbloqueos', col(csv[2], 'ctx_modelo') === 'Pixel 8' && col(csv[2], 'carga_tipo_inicio') === '1' && col(csv[2], 'pantalla_desbloqueos') === '1', csv[2]);
   assert('CSV: la noche sin contexto deja esas columnas vacías, con las mismas columnas',
-    csv[1].split(',').length >= header.length && col(csv[1], 'ctx_modelo') === '' && col(csv[1], 'bateria_inicio') === '');
+    csv[1].split(',').length >= header.length && col(csv[1], 'ctx_modelo') === '' && col(csv[1], 'carga_tipo_inicio') === '');
   const json = JSON.parse(sessionsToJson([withCtx, without])) as SleepSession[];
   assert('JSON: el contexto va anidado tal como se guarda', json[1].context?.device?.model === 'Pixel 8' && json[1].context?.screen?.unlocks === 1 && json[0].context === undefined);
   assert('aplanar sin contexto da una fila vacía', Object.keys(flattenContext(undefined)).length === 0);
 
   const sections = describeContext(context);
   const labels = sections.map((s) => s.title);
-  assert('texto en español: aparato, pantalla y batería y carga', ['Aparato', 'Pantalla', 'Batería y carga'].every((t) => labels.includes(t)), labels);
-  assert('texto en español: la red se dice sin nombres', sections.some((s) => s.rows.some((r) => r.label === 'Red' && r.value.startsWith('Wi-Fi'))));
+  assert('texto en español: aparato, pantalla y carga', ['Aparato', 'Pantalla', 'Carga'].every((t) => labels.includes(t)), labels);
+  assert('CSV: sin columnas de batería, red, timbre ni alarma',
+    !header.some((h) => /^(bateria|red_|timbre|alarma|dnd|doze|avion|ahorro|brillo|bt_|proximidad)/.test(h)), header);
   let threw = false;
   try {
     describeContext({ v: 1, screen: 5, power: 'x', sensors: { alarm: { status: 'otra' } }, algo: { triggers: 7 } } as unknown as SessionContext);
@@ -1212,13 +1163,12 @@ console.log('\n--- Precisión: exportación del contexto ---');
   const uses = describeContext({
     v: 1,
     screen: { ons: 2, unlocks: 2, glances: 0, nightUnlocks: 1, nightOns: 1, useSec: 3725, usesSec: [125, 3600], longestSec: 3600, onAtStart: false, onAtEnd: false },
-    power: { plugs: 0, unplugs: 0, chargingPct: null, tempC: { min: 24.5, max: 31 } },
+    power: { plugs: 0, unplugs: 0, chargingPct: null },
   }).flatMap((x) => x.rows);
   const val = (label: string) => uses.find((r) => r.label === label)?.value.replace(/\u00a0/g, ' ');
   assert('texto: duraciones con horas y sin partir «5 s» al final de línea',
     val('Uso total') === '1 h 2 min' && val('Cada uso') === '2 min 5 s, 1 h' && !uses.find((r) => r.label === 'Cada uso')?.value.includes('5 s'),
     [val('Uso total'), val('Cada uso')]);
-  assert('texto: temperatura con coma decimal', val('Temperatura de la batería') === '24,5 a 31 °C', val('Temperatura de la batería'));
   const noOffset = describeContext({ v: 1, device: { app: '1', tz: 'Europe/Madrid' } } as unknown as SessionContext);
   assert('texto: sin desfase guardado no sale «UTC−NaN»',
     noOffset.flatMap((x) => x.rows).find((r) => r.label === 'Zona horaria')?.value === 'Europe/Madrid');
@@ -1294,12 +1244,9 @@ console.log('\n--- Precisión: los eventos nuevos no mueven la detección ---');
   ];
   const extra: RawEvent[] = [
     ...base,
-    { at: at('2026-09-21T23:31:00'), kind: 'lux', v: 0 }, { at: at('2026-09-21T23:00:00'), kind: 'batt', v: 70 },
-    { at: at('2026-09-22T02:00:00'), kind: 'net', v: 0 }, { at: at('2026-09-22T03:00:00'), kind: 'airplane', v: 1 },
-    { at: at('2026-09-22T04:00:00'), kind: 'ringer', v: 0 }, { at: at('2026-09-22T05:00:00'), kind: 'bt', v: 1 },
-    // Con el contexto activo el servicio también anota la próxima alarma y el
-    // audio aunque esos sensores estén apagados: la detección no debe usarlos.
-    { at: at('2026-09-21T23:00:00'), kind: 'alarm', v: at('2026-09-22T07:00:00') },
+    { at: at('2026-09-21T23:31:00'), kind: 'lux', v: 0 }, { at: at('2026-09-21T23:00:00'), kind: 'chg-type', v: 1 },
+    // Con el contexto activo el servicio también anota el audio aunque ese
+    // sensor esté apagado: la detección no debe usarlo.
     { at: at('2026-09-22T02:00:00'), kind: 'audio', v: 1 }, { at: at('2026-09-22T02:40:00'), kind: 'audio', v: 0 },
     { at: at('2026-09-22T07:00:30'), kind: 'screen-on' },
   ];
@@ -1345,7 +1292,7 @@ console.log('\n--- Archivo permanente: la poda del estado no quita datos del arc
       inferred: i === 5 ? true : undefined,
       context: buildContext({
         start, end, now: end + HOUR, sensorsOn: [],
-        events: [{ at: start + HOUR, kind: 'batt', v: 70 }],
+        events: [{ at: start + HOUR, kind: 'chg-type', v: 1 }],
         device: buildDevice({ start, appVersion: '1.0.0', snapshot: null }),
       }),
     };

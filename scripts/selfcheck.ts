@@ -6,7 +6,6 @@ import {
   evaluateGap,
   evaluateGaps,
   mergeDetections,
-  proposeFromSchedule,
   refineEdges,
   type DetectionResult,
 } from '../src/lib/activityMonitor';
@@ -205,18 +204,18 @@ assert('la fusión se queda con el borde de la señal más directa',
   fused.session.start === byScreen.session.start && fused.session.end === byScreen.session.end,
   [fused.session.start, fused.session.end]);
 
-// Un mismo disparador puede dejar la noche en trozos —Doze sale a su ventana
-// de mantenimiento y vuelve a entrar—, y esos trozos son una noche, no varias.
+// Un mismo disparador puede dejar la noche en trozos —el cargador que se
+// desenchufa y vuelve a enchufar—, y esos trozos son una noche, no varias.
 // Cada trozo suelto es corto y el segundo empieza de madrugada, así que por
 // separado ninguno pasaría por noche: se juzgan ya unidos, como hace la cola
 // nativa (`evaluateGaps`), y no trozo a trozo con `evaluateGap`.
 const trozos = [
-  { start: at('2026-08-18T23:45:00'), end: at('2026-08-19T03:00:00'), startTrigger: 'idle', endTrigger: 'idle' },
-  { start: at('2026-08-19T03:10:00'), end: at('2026-08-19T07:00:00'), startTrigger: 'idle', endTrigger: 'idle' },
+  { start: at('2026-08-18T23:45:00'), end: at('2026-08-19T03:00:00'), startTrigger: 'charger', endTrigger: 'charger' },
+  { start: at('2026-08-19T03:10:00'), end: at('2026-08-19T07:00:00'), startTrigger: 'charger', endTrigger: 'charger' },
 ] as const;
 assert('el segundo trozo, suelto, no pasaría por noche',
-  evaluateGap(trozos[1].start, trozos[1].end, mon, ['idle']) === null);
-const unida = evaluateGaps([...trozos], mon).results;
+  evaluateGap(trozos[1].start, trozos[1].end, mon, ['charger']) === null);
+const unida = evaluateGaps([...trozos], { ...mon, triggers: { ...DEFAULT_TRIGGERS, charger: true } }).results;
 assert('dos trozos del mismo disparador se unen en una noche', unida.length === 1, unida.length);
 assert('y la noche abarca de principio a fin',
   unida[0]?.session.start === trozos[0].start && unida[0]?.session.end === trozos[1].end);
@@ -242,89 +241,23 @@ assert('dos disparadores que coinciden puntúan más que uno',
 assert('pero una tarde de 19:30 no llega a confianza alta',
   corroborated.session.confidence === 'medium', corroborated.session.confidence);
 
-const noches: SleepSession[] = [];
-const flatSchedule: ScheduleSettings = { mode: 'uniform', goals: { ...DEFAULT_GOALS } };
-const morning = at('2026-08-19T10:00:00'); // meta de despertar: 07:00
-
-assert('sin el disparador de horario no se propone nada',
-  proposeFromSchedule(flatSchedule, mon, noches, null, morning) === null);
-
-const withSchedule: MonitorSettings = {
-  ...mon,
-  triggers: { ...DEFAULT_TRIGGERS, schedule: true },
-};
-const fromGoal = proposeFromSchedule(flatSchedule, withSchedule, noches, null, morning);
-assert('el horario propone la noche que acaba de terminar', fromGoal !== null);
-assert('con la duración de la meta',
-  fromGoal !== null && fromGoal.result.session.end - fromGoal.result.session.start === 8 * 3_600_000,
-  fromGoal && formatDuration(fromGoal.result.session.end - fromGoal.result.session.start));
-assert('y siempre con confianza baja', fromGoal?.result.session.confidence === 'low');
-assert('no se repite la misma noche dos veces',
-  proposeFromSchedule(flatSchedule, withSchedule, noches, fromGoal!.key, morning) === null);
-assert('ni pisa una noche ya registrada',
-  proposeFromSchedule(flatSchedule, withSchedule, [fromGoal!.result.session], null, morning) === null);
-assert('ni se adelanta a la noche en curso',
-  proposeFromSchedule(flatSchedule, withSchedule, noches, null, at('2026-08-19T07:30:00')) === null);
-
-const goalSession = refineEdges(fromGoal!.result.session, 15);
-assert('refineEdges no descuenta latencia a la propuesta del horario',
-  goalSession.start === fromGoal!.result.session.start);
-
 const mixed: DetectionResult[] = [byScreen, evaluateGap(at('2026-08-20T00:10:00'), at('2026-08-20T08:00:00'), mon, ['screen'])!];
 assert('noches distintas no se fusionan', mergeDetections(mixed, mon).length === 2);
 
-console.log('\n--- Módulo 3: disparadores nuevos (reposo y no molestar) ---');
+console.log('\n--- Módulo 3: disparadores retirados (reposo, no molestar y horario) ---');
 
-// Los dos nuevos existen en el catálogo, dependen del servicio nativo y sólo
-// el de reposo viene encendido: «No molestar» no lo usa todo el mundo, y
-// encenderlo por defecto a quien no lo usa sólo produciría silencio.
-assert('el catálogo incluye reposo y no molestar',
-  TRIGGER_BY_ID.idle !== undefined && TRIGGER_BY_ID.dnd !== undefined);
-assert('ambos dependen del servicio nativo',
-  TRIGGER_BY_ID.idle.native && TRIGGER_BY_ID.dnd.native);
-assert('el reposo viene activo y no molestar no',
-  DEFAULT_TRIGGERS.idle === true && DEFAULT_TRIGGERS.dnd === false);
-assert('los cuatro nativos son los que el servicio sabe escuchar',
-  TRIGGERS.filter((t) => t.native).map((t) => t.id).join(',') === 'screen,charger,idle,dnd',
+// Con 18 noches reales no aportaron nada y se retiraron: el servicio sólo
+// escucha la pantalla y el cargador.
+assert('los nativos son sólo pantalla y cargador',
+  TRIGGERS.filter((t) => t.native).map((t) => t.id).join(',') === 'screen,charger',
   TRIGGERS.filter((t) => t.native).map((t) => t.id));
-
-const withIdle: MonitorSettings = {
-  ...mon,
-  triggers: { ...DEFAULT_TRIGGERS, idle: true, dnd: true },
-};
-assert('el reposo se evalúa cuando está activo', triggerEnabled(withIdle, 'idle'));
-assert('y el interruptor general también lo silencia',
-  triggerEnabled({ ...withIdle, enabled: false }, 'idle') === false);
-
-// Doze llega tarde y se va pronto: el sistema tarda en dar el móvil por
-// quieto y sale de reposo en cuanto se toca, y además se interrumpe en cada
-// ventana de mantenimiento. Por eso no debe recortar a la pantalla, que mide
-// el bloqueo real: la fusión se queda con el borde de la señal más directa.
-const byIdle = evaluateGap(at('2026-08-18T23:55:00'), at('2026-08-19T07:05:00'), withIdle, ['idle'])!;
-assert('un hueco medido por Doze se detecta igual', byIdle !== null);
-const idlePlusScreen = mergeDetections([byScreen, byIdle], withIdle);
-assert('pantalla y reposo sobre la misma noche dan una sola sesión',
-  idlePlusScreen.length === 1, idlePlusScreen.length);
-assert('la pantalla manda sobre el reposo por ser más directa',
-  idlePlusScreen[0].session.start === byScreen.session.start
-    && idlePlusScreen[0].session.end === byScreen.session.end,
-  [idlePlusScreen[0].session.start, idlePlusScreen[0].session.end]);
-assert('y la noche no se encoge al fundirse',
-  idlePlusScreen[0].session.end - idlePlusScreen[0].session.start
-    >= Math.max(byScreen.gapMs, byIdle.gapMs));
-assert('con los dos orígenes anotados',
-  describeTriggers(idlePlusScreen[0].session.triggers) === 'pantalla + reposo',
-  describeTriggers(idlePlusScreen[0].session.triggers));
-
-// «No molestar» de 23:00 a 07:00 toca la noche por los dos extremos.
-const byDnd = evaluateGap(at('2026-08-18T23:00:00'), at('2026-08-19T07:00:00'), withIdle, ['dnd'])!;
-assert('no molestar toda la noche es confianza alta',
-  byDnd.session.confidence === 'high', byDnd.session.confidence);
-
-// Una tarde entera con el móvil en reposo no es sueño: la ventana nocturna es
-// lo que impide que un disparador nuevo empiece a inventar siestas.
-assert('el reposo de una tarde no se propone',
-  evaluateGap(at('2026-08-19T13:00:00'), at('2026-08-19T17:30:00'), withIdle, ['idle']) === null);
+assert('el catálogo ya no tiene reposo, no molestar ni horario',
+  !('idle' in TRIGGER_BY_ID) && !('dnd' in TRIGGER_BY_ID) && !('schedule' in TRIGGER_BY_ID));
+// Las noches guardadas con esos orígenes siguen mostrándose sin romper nada.
+assert('una sesión antigua con un disparador retirado se describe con los que quedan',
+  describeTriggers(['screen', 'idle' as TriggerId]) === 'pantalla');
+assert('y una sólo con retirados no se describe',
+  describeTriggers(['dnd' as TriggerId]) === null);
 
 console.log('\n--- Módulo 3: registro de detección ---');
 
@@ -364,7 +297,7 @@ assert('con el mismo instante, lo que midió el móvil va antes que lo que decid
 assert('un detalle distinto cuenta como evento nuevo',
   appendEvents(base, [ev(t0, 'screen', 'open', 'tras rearme')]).length === 3);
 assert('un disparador distinto también',
-  appendEvents(base, [ev(t0, 'idle', 'open')]).length === 3);
+  appendEvents(base, [ev(t0, 'charger', 'open')]).length === 3);
 
 // El tope evita que un servicio que rearranca en bucle llene el disco.
 const many = Array.from({ length: 50 }, (_, i) => ev(t0 + i * 1000, null, 'service', `n${i}`));

@@ -56,13 +56,7 @@ export type TriggerId =
   /** Móvil puesto a cargar → desenchufado. Útil para quien carga de noche. */
   | 'charger'
   /** Hueco entre dos aperturas de PerfectRest. Funciona sin servicio nativo. */
-  | 'appOpen'
-  /** Android entra en reposo profundo (Doze) y sale de él. */
-  | 'idle'
-  /** «No molestar» se activa y se desactiva, a mano o por el modo descanso. */
-  | 'dnd'
-  /** Sin ninguna otra señal, se propone la meta del horario como estimación. */
-  | 'schedule';
+  | 'appOpen';
 
 /**
  * Sensores baratos que afinan la detección. A diferencia de los disparadores,
@@ -76,10 +70,6 @@ export type SensorId =
   | 'steps'
   /** Luz ambiental: apagar la luz es la marca más clara de irse a dormir. */
   | 'light'
-  /** Proximidad: móvil en el bolsillo o boca abajo, o cogido de nuevo. */
-  | 'proximity'
-  /** Próxima alarma del reloj: cuándo se espera despertar. */
-  | 'alarm'
   /** Audio sonando con la pantalla apagada: aún no se ha dormido. */
   | 'audio'
   /** Postura del móvil (gravedad): plano y quieto sobre una superficie, o en bolsillo/mano. */
@@ -295,7 +285,6 @@ export interface ContextAlgo {
     moves: number | null;
     flat: number | null;
     litFlat?: number | null;
-    alarmMatch: boolean | null;
   };
   /** Huecos de la misma noche que se descartaron y por qué. */
   discards?: Array<{ reason: string; startMin: number; endMin: number }>;
@@ -345,39 +334,14 @@ export interface SessionContext {
     chargingPct: number | null;
     /** 0 sin carga, 1 pared, 2 USB, 3 inalámbrica, 4 base. */
     chargeType?: StateSummary;
-    battery?: StateSummary;
-    /** Temperatura de la batería, °C. */
-    tempC?: { min: number; max: number };
-  };
-  system?: {
-    doze?: StateSummary;
-    dnd?: StateSummary;
-    airplane?: StateSummary;
-    powerSave?: StateSummary;
-    ringer?: StateSummary;
-    net?: StateSummary;
-    /** Dispositivos Bluetooth de audio conectados. */
-    bt?: StateSummary;
-    bright?: StateSummary;
-    orient?: StateSummary;
   };
   sensors?: {
     /** Sensores de detección que el usuario tenía activos. */
     on: SensorId[];
     steps?: { steps: number; motions: number };
     light?: { pct: Record<string, number>; luxMin?: number; luxMax?: number; changes: number };
-    proximity?: { coveredPct: number | null; changes: number };
     posture?: { readings: number; flatPct: number; carried: number; tilted: number };
     audio?: { playingPct: number; starts: number };
-    alarm?: {
-      /** Alarma que cae cerca del final de la noche (epoch ms), si la hay. */
-      at: number | null;
-      /** Minutos entre el despertar y la alarma (negativo: sonó antes). */
-      deltaMin?: number;
-      status: 'rang' | 'cancelled' | 'no-screen' | 'pending' | 'none';
-      /** ¿Había alguna alarma programada al empezar la sesión? */
-      setAtStart: boolean | null;
-    };
   };
   /** Salud del servicio durante el tramo. */
   service?: { restarts: number; errors: number };

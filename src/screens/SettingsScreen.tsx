@@ -466,7 +466,7 @@ export function SettingsScreen() {
             checked={monitor.keepHistory}
             onChange={(v) => patch({ monitor: { ...monitor, keepHistory: v } })}
             label="Conservar histórico sin caducidad"
-            hint="Guarda en este móvil, sin límite de tiempo ni poda, todo lo que ve el servicio —el registro bruto con los mismos campos de siempre (pantalla, cargador, sensores y parámetros del sistema, con su hora), las lecturas de los sensores y tus noches con su contexto—, por meses y comprimido al cerrar cada mes. Reduce el ruido antes de guardar (la luz sólo con la pantalla apagada y al cambiar de nivel; la alarma sólo si cambia). Todo es local y nunca sale si no lo exportas. Nunca ubicación, nombres de redes o de dispositivos, apps ni notificaciones."
+            hint="Guarda en este móvil, sin límite de tiempo ni poda, todo lo que ve el servicio —el registro bruto con los mismos campos de siempre (pantalla, cargador, sensores y parámetros del sistema, con su hora), las lecturas de los sensores y tus noches con su contexto—, por meses y comprimido al cerrar cada mes. Reduce el ruido antes de guardar (la luz sólo con la pantalla apagada y al cambiar de nivel). Todo es local y nunca sale si no lo exportas. Nunca ubicación, nombres de redes o de dispositivos, apps ni notificaciones."
           />
           <Toggle
             checked={monitor.allSensors}
@@ -480,7 +480,7 @@ export function SettingsScreen() {
             checked={monitor.saveContext}
             onChange={setSaveContext}
             label="Guardar contexto del dispositivo con cada noche"
-            hint="Para afinar la detección, cada noche guarda un resumen de lo que hizo el móvil entre media hora antes de dormirte y media hora después de despertar: cuántas veces se encendió la pantalla, batería y carga, tipo de red (no su nombre), modo avión, timbre, «no molestar», ahorro de energía, sensores y cómo se detectó la noche, además del modelo de móvil y la versión de Android y de la app. Son recuentos, mínimos, máximos y porcentajes. Nunca ubicación, nombres de redes o de dispositivos Bluetooth, contenido de notificaciones, nombres de apps ni identificadores. Todo se queda en este móvil y sólo sale si tú lo exportas."
+            hint="Para afinar la detección, cada noche guarda un resumen de lo que hizo el móvil entre media hora antes de dormirte y media hora después de despertar: cuántas veces se encendió la pantalla, la carga, los sensores y cómo se detectó la noche, además del modelo de móvil y la versión de Android y de la app. Son recuentos, mínimos, máximos y porcentajes. Nunca ubicación, contenido de notificaciones, nombres de apps ni identificadores. Todo se queda en este móvil y sólo sale si tú lo exportas."
           />
         </div>
       </Card>

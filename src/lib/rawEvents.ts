@@ -21,22 +21,14 @@ export type RawKind =
   | 'unlock'
   | 'plug'
   | 'unplug'
-  | 'idle-on'
-  | 'idle-off'
-  | 'dnd-on'
-  | 'dnd-off'
   /** Pasos andados desde el evento anterior (v = cuántos). */
   | 'steps'
   /** Movimiento significativo, cuando no hay contador de pasos. */
   | 'motion'
   /** Cambio de nivel de luz (v: 0 oscuro, 1 tenue, 2 claro). */
   | 'light'
-  /** Proximidad (v: 1 tapado, 0 libre). */
-  | 'proximity'
   /** Audio sonando (v: 1) o no (v: 0). */
   | 'audio'
-  /** Próxima alarma del reloj (v = instante en que sonará; 0 si no hay). */
-  | 'alarm'
   /**
    * Postura del móvil en una lectura puntual con la pantalla apagada (v: ver
    * `POSTURE_*`). Una línea por lectura, cada pocos minutos.
@@ -51,34 +43,31 @@ export type RawKind =
   | 'posture-lux'
   // --- Contexto del dispositivo ---------------------------------------------
   // Los escribe el muestreo ligero del servicio (`ContextSampler.java`) sólo
-  // cuando cambia el valor, más una lectura de refresco cada pocas horas, y los
-  // resume `sessionContext.ts` para cada noche. No los lee la detección.
-  /** Nivel de batería, en % (0-100). */
-  | 'batt'
-  /** Temperatura de la batería, en décimas de °C. */
-  | 'batt-temp'
+  // cuando cambia el valor, y los resume `sessionContext.ts` para cada noche.
+  // Se quedaron sólo los que dicen algo del sueño: el resto (batería, red,
+  // timbre, Bluetooth, brillo, orientación, modo avión, ahorro, Doze y «no
+  // molestar») no entraba en la detección y se dejó de muestrear.
   /** Tipo de carga (`CHARGE_*`). */
   | 'chg-type'
-  /** Red activa (`NET_*`). */
-  | 'net'
-  /** Modo avión (v: 1 activo, 0 no). */
-  | 'airplane'
-  /** Modo del timbre (`RINGER_*`). */
-  | 'ringer'
-  /** Modo de ahorro de energía (v: 1 activo, 0 no). */
-  | 'powersave'
-  /** Reposo profundo muestreado (v: 1 en Doze, 0 no). */
-  | 'doze'
-  /** Filtro de interrupciones (`DND_*`: 1 todo, 2 prioritarias, 3 silencio total, 4 sólo alarmas). */
-  | 'dnd-mode'
-  /** Dispositivos Bluetooth de audio conectados (v = cuántos). */
-  | 'bt'
-  /** Brillo de la pantalla, en % (0-100). */
-  | 'bright'
-  /** Orientación de la pantalla (v: 1 vertical, 2 horizontal). */
-  | 'orient'
   /** Lux medidos en el último cambio de nivel de luz. */
   | 'lux';
+
+/** Tipos que la app sabe leer; lo demás (de versiones anteriores) se ignora. */
+const KNOWN_KINDS = new Set<string>([
+  'screen-off',
+  'screen-on',
+  'unlock',
+  'plug',
+  'unplug',
+  'steps',
+  'motion',
+  'light',
+  'audio',
+  'posture',
+  'posture-lux',
+  'chg-type',
+  'lux',
+]);
 
 /** Tipos de carga de `chg-type`. */
 export const CHARGE_NONE = 0;
@@ -87,17 +76,6 @@ export const CHARGE_USB = 2;
 export const CHARGE_WIRELESS = 3;
 export const CHARGE_DOCK = 4;
 
-/** Redes de `net`. */
-export const NET_NONE = 0;
-export const NET_WIFI = 1;
-export const NET_CELLULAR = 2;
-export const NET_ETHERNET = 3;
-export const NET_OTHER = 4;
-
-/** Modos del timbre de `ringer`. */
-export const RINGER_SILENT = 0;
-export const RINGER_VIBRATE = 1;
-export const RINGER_NORMAL = 2;
 
 export interface RawEvent {
   at: number;
@@ -111,6 +89,15 @@ export const LIGHT_DIM = 1;
 export const LIGHT_BRIGHT = 2;
 /** Lux a partir de los cuales hay luz de verdad (el mismo umbral que `LUX_BRIGHT` del servicio). */
 export const LUX_BRIGHT = 50;
+/**
+ * Lux a partir de los cuales un móvil plano boca arriba está en una habitación
+ * con la luz encendida, no en una cama a oscuras. Calibrado con 18 noches
+ * reales: dormido, las lecturas boca arriba dieron 0 lux (65 de 65 dentro de la
+ * noche); despierto en casa por la noche, la luz de la habitación dio 30-50 lux,
+ * que con el umbral de 50 contaban como «oscuro». Entre 1 y 49 lux no hubo
+ * ninguna lectura con el usuario dormido.
+ */
+export const LUX_LIT_FLAT = 10;
 
 /** Posturas que registra el servicio a partir de la gravedad y el vaivén del acelerómetro. */
 export const POSTURE_FLAT_UP = 0;
@@ -125,9 +112,7 @@ export const SENSOR_OF_KIND: Partial<Record<RawKind, SensorId>> = {
   steps: 'steps',
   motion: 'steps',
   light: 'light',
-  proximity: 'proximity',
   audio: 'audio',
-  alarm: 'alarm',
   posture: 'posture',
   'posture-lux': 'light',
 };
@@ -140,6 +125,7 @@ export function cleanRawEvents(raw: unknown): RawEvent[] {
     if (!item || typeof item !== 'object') continue;
     const { at, kind, v } = item as { at?: unknown; kind?: unknown; v?: unknown };
     if (typeof at !== 'number' || !Number.isFinite(at) || typeof kind !== 'string') continue;
+    if (!KNOWN_KINDS.has(kind)) continue;
     out.push({ at, kind: kind as RawKind, ...(typeof v === 'number' ? { v } : {}) });
   }
   return out.sort((a, b) => a.at - b.at);
@@ -159,7 +145,7 @@ export interface GapEvidence {
    * dormir», y suele ser muy posterior al último uso del móvil.
    */
   activityAt: number | null;
-  /** Primer despertar real dentro del hueco: pasos o movimiento sostenidos, o la alarma. */
+  /** Primer despertar real dentro del hueco: pasos o movimiento sostenidos. */
   wakeAt: number | null;
   /** Fracción (0-1) del sueño estimado con luz apagada; null sin datos de luz. */
   dark: number | null;
@@ -176,10 +162,6 @@ export interface GapEvidence {
    * no una cama.
    */
   litFlat: number | null;
-  /** Hora de la alarma que sonó cerca del final, si la hubo. */
-  alarmAt: number | null;
-  /** ¿Hay alarma programada y cae cerca del final de la noche? null sin datos de alarma. */
-  alarmMatch: boolean | null;
   /** Sensores que han aportado datos a este hueco. */
   sensors: SensorId[];
 }
@@ -191,8 +173,6 @@ export const NO_EVIDENCE: GapEvidence = {
   moves: null,
   flat: null,
   litFlat: null,
-  alarmAt: null,
-  alarmMatch: null,
   sensors: [],
 };
 
@@ -260,10 +240,6 @@ function episodes(events: RawEvent[], from: number, to: number, enabled: SensorI
         if (has('steps'))
           spans.push({ from: e.at, to: e.at + POINT_SPAN_MS, weight: 2, light: false });
         break;
-      case 'proximity':
-        if (has('proximity'))
-          spans.push({ from: e.at, to: e.at + POINT_SPAN_MS / 2, weight: 1, light: false });
-        break;
       case 'posture':
         if (has('posture') && e.v === POSTURE_CARRIED)
           spans.push({ from: e.at, to: e.at + POSTURE_SPAN_MS, weight: POSTURE_WEIGHT, light: false });
@@ -272,7 +248,7 @@ function episodes(events: RawEvent[], from: number, to: number, enabled: SensorI
         // Plano pero con luz: sobre una mesa a la vista, no en una cama a oscuras.
         // Cada lectura es una luz clara de unos minutos; dos seguidas cuentan como
         // un rato de luz encendida y mueven el inicio como cualquier luz que se apaga.
-        if (has('posture') && has('light') && (e.v ?? 0) >= LUX_BRIGHT)
+        if (has('posture') && has('light') && (e.v ?? 0) >= LUX_LIT_FLAT)
           spans.push({ from: e.at, to: e.at + POSTURE_SPAN_MS, weight: POSTURE_WEIGHT, light: true });
         break;
       case 'light':
@@ -330,7 +306,7 @@ const sustained = (ep: Episode) => ep.to - ep.from >= EPISODE_MIN_MS || ep.weigh
  *    luz clara, porque la luz que se apaga es precisamente la señal de acostarse.
  *  - **wakeAt**: inicio del primer episodio sostenido, sin contar la luz, que
  *    sale sola con el amanecer, después de al menos cuatro horas de sueño; o la
- *    alarma, si sonó y la pantalla se encendió a esa hora.
+ *    (antes también la alarma; con datos reales era el ruido de otra app).
  *  - **moves**: episodios sostenidos entre ambos extremos.
  *  - **dark**: parte del tiempo dormido con luz apagada.
  */
@@ -358,40 +334,11 @@ export function gatherEvidence(
 
   // Primer despertar real, en la última parte.
   const tail = eps.filter((ep) => !ep.lightOnly && ep.from >= sleepFrom + MIN_SLEEP_MS && ep.from <= end - 20 * MINUTE);
-  let wakeAt: number | null = tail.length ? tail[0].from : null;
-
-  // La alarma: la última programada antes de la noche. Si sonó dentro del
-  // hueco y la pantalla se encendió entonces, ahí se despertó (aunque no
-  // desbloqueara el móvil hasta mucho después).
-  let alarmAt: number | null = null;
-  let alarmMatch: boolean | null = null;
-  if (enabled.includes('alarm')) {
-    const alarms = events.filter((e) => e.kind === 'alarm' && e.at <= end && (e.v ?? 0) > 0);
-    if (alarms.length) {
-      used.add('alarm');
-      // Cualquier alarma anotada durante o antes de la noche que caiga cerca del final.
-      const times = [...new Set(alarms.map((e) => e.v as number))];
-      const near = times.filter((t) => t >= end - 5 * HOUR && t <= end + 30 * MINUTE);
-      alarmMatch = near.some((t) => Math.abs(end - t) <= HOUR);
-      const rang = near
-        .filter((t) => t > sleepFrom + MIN_SLEEP_MS && t < end - 20 * MINUTE)
-        .filter((t) =>
-          events.some(
-            (e) => e.kind === 'screen-on' && e.at >= t - 2 * MINUTE && e.at <= t + 15 * MINUTE,
-          ),
-        );
-      if (rang.length) {
-        alarmAt = Math.min(...rang);
-        wakeAt = wakeAt === null ? alarmAt : Math.min(wakeAt, alarmAt);
-      }
-    } else {
-      alarmMatch = false;
-    }
-  }
+  const wakeAt: number | null = tail.length ? tail[0].from : null;
 
   // Quietud interior.
   const wakeBound = wakeAt ?? end;
-  const moves = used.has('steps') || used.has('proximity') || used.has('audio') || used.has('posture')
+  const moves = used.has('steps') || used.has('audio') || used.has('posture')
     ? eps.filter((ep) => !ep.lightOnly && ep.from > sleepFrom && ep.from < wakeBound).length
     : null;
 
@@ -417,7 +364,7 @@ export function gatherEvidence(
         const l = r.v === POSTURE_FLAT_UP ? luxOf(r.at) : undefined;
         if (l) {
           measured++;
-          if ((l.v ?? 0) >= LUX_BRIGHT) {
+          if ((l.v ?? 0) >= LUX_LIT_FLAT) {
             lit++;
             continue;
           }
@@ -455,8 +402,6 @@ export function gatherEvidence(
     moves,
     flat,
     litFlat,
-    alarmAt,
-    alarmMatch,
     sensors: [...used],
   };
 }
@@ -509,6 +454,28 @@ const UNLOCK_SLACK_MS = 5_000;
  * empieza después, con su propio inicio.
  */
 export function lastSustainedUse(events: RawEvent[], from: number, to: number): number | null {
+  const uses = sustainedUses(events, from, to);
+  return uses.length ? uses[uses.length - 1].off : null;
+}
+
+/**
+ * Inicio del primer uso sostenido del móvil dentro de un tramo; null si no lo
+ * hubo. Es el final de la noche cuando el hueco se alargó más allá de él (el
+ * servicio no lo cerró, o el hueco viene de otro disparador): con datos reales,
+ * una mañana de desbloqueos, pasos y pantalla seguía contando como sueño hasta
+ * las 11:23 cuando el primer uso sostenido fue a las 08:14.
+ */
+export function firstSustainedUse(events: RawEvent[], from: number, to: number): number | null {
+  const uses = sustainedUses(events, from, to);
+  return uses.length ? uses[0].on : null;
+}
+
+/** Desbloqueos dentro de un tramo: cada uno es alguien despierto mirando el móvil. */
+export function unlocksIn(events: RawEvent[], from: number, to: number): number {
+  return events.filter((e) => e.kind === 'unlock' && e.at > from && e.at < to).length;
+}
+
+function sustainedUses(events: RawEvent[], from: number, to: number): Array<{ on: number; off: number }> {
   const stints: Array<{ on: number; off: number }> = [];
   let on: number | null = null;
   for (const e of events) {
@@ -528,7 +495,7 @@ export function lastSustainedUse(events: RawEvent[], from: number, to: number): 
   const unlocked = (s: { on: number; off: number }) => unlocks.some((u) => u >= s.on - UNLOCK_SLACK_MS && u <= s.off);
   const used = stints.filter(unlocked);
 
-  let last: number | null = null;
+  const out: Array<{ on: number; off: number }> = [];
   let cluster: Array<{ on: number; off: number }> = [];
   const close = () => {
     if (!cluster.length) return;
@@ -536,7 +503,7 @@ export function lastSustainedUse(events: RawEvent[], from: number, to: number): 
     const end = cluster[cluster.length - 1].off;
     const use = cluster.reduce((sum, s) => sum + (s.off - s.on), 0);
     const count = unlocks.filter((u) => u >= first - UNLOCK_SLACK_MS && u <= end).length;
-    if (use >= SUSTAINED_USE_MS || count >= SUSTAINED_UNLOCKS) last = end;
+    if (use >= SUSTAINED_USE_MS || count >= SUSTAINED_UNLOCKS) out.push({ on: first, off: end });
     cluster = [];
   };
   for (const s of used) {
@@ -544,5 +511,5 @@ export function lastSustainedUse(events: RawEvent[], from: number, to: number): 
     cluster.push(s);
   }
   close();
-  return last;
+  return out;
 }

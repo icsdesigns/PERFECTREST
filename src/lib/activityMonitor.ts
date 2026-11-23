@@ -2,7 +2,7 @@ import { App } from '@capacitor/app';
 import { Capacitor } from '@capacitor/core';
 import { HOUR, MINUTE, formatDuration, inWindow, parseTime } from './time';
 import { minuteDiff, type SleepHabit } from './habit';
-import { gatherEvidence, lastSustainedUse, LIT_FLAT_MAX_SHARE, quietEvidence, type GapEvidence, type RawEvent } from './rawEvents';
+import { firstSustainedUse, gatherEvidence, lastSustainedUse, unlocksIn, LIT_FLAT_MAX_SHARE, quietEvidence, type GapEvidence, type RawEvent } from './rawEvents';
 import { activeSensors } from './sensors';
 import { loadRaw, saveRaw } from './storage';
 import {
@@ -21,11 +21,9 @@ import {
   sortTriggers,
   triggerEnabled,
 } from './triggers';
-import { goalForDate } from './schedule';
 import type {
   Confidence,
   MonitorSettings,
-  ScheduleSettings,
   SleepSession,
   TriggerId,
 } from './types';
@@ -52,7 +50,6 @@ import type {
 
 const HEARTBEAT_KEY = 'perfectrest.heartbeat';
 /** Última noche propuesta a partir del horario, para no repetirla. */
-const SCHEDULE_MARK_KEY = 'perfectrest.scheduleProposal';
 /** Cada cuánto se refresca el latido mientras la app está visible. */
 const HEARTBEAT_INTERVAL = 30_000;
 
@@ -77,6 +74,8 @@ export interface DetectionResult {
    * fuera de tu hora»…
    */
   discards?: Array<{ reason: RejectedGap['reason']; start: number; end: number }>;
+  /** Desbloqueos dentro de la propuesta, según el registro bruto; sin registro, undefined. */
+  unlocks?: number;
 }
 
 /**
@@ -462,17 +461,16 @@ function scoreGap(input: ScoreInput): { score: number; confidence: Confidence } 
   ]);
 
   // Acuerdo entre disparadores: sólo cuentan los que miden el dispositivo.
-  const independent = new Set(triggers.filter((id) => id !== 'appOpen' && id !== 'schedule'));
+  const independent = new Set(triggers.filter((id) => id !== 'appOpen'));
   parts.push([1.5, independent.size >= 3 ? 1 : independent.size === 2 ? 0.9 : independent.size === 1 ? 0.4 : 0.2]);
 
   if (evidence) {
     if (evidence.moves !== null) parts.push([1, evidence.moves === 0 ? 1 : evidence.moves === 1 ? 0.6 : 0.2]);
     if (evidence.dark !== null) parts.push([1.5, evidence.dark]);
     // Móvil plano y quieto sobre una superficie: la postura que tiene quien
-    // duerme con el móvil al lado. Con luz apagada o proximidad tapada, esas
-    // evidencias suman por su lado; aquí sólo cuenta la postura.
+    // duerme con el móvil al lado. Con luz apagada, esa evidencia suma por su
+    // lado; aquí sólo cuenta la postura.
     if (evidence.flat !== null) parts.push([1.5, evidence.flat]);
-    if (evidence.alarmMatch !== null) parts.push([evidence.alarmMatch ? 1.5 : 0.5, evidence.alarmMatch ? 1 : 0.4]);
   }
 
   const totalWeight = parts.reduce((sum, [w]) => sum + w, 0);
@@ -656,10 +654,6 @@ export function refineEdges(
   latencyMinutes: number,
   options: RefineOptions = {},
 ): SleepSession {
-  // Una propuesta calcada del horario ya está expresada en tiempo de sueño:
-  // corregirle los bordes descontaría la latencia dos veces.
-  if (session.triggers?.length === 1 && session.triggers[0] === 'schedule') return session;
-
   const learned = options.learnedLatencyMinutes;
   const startBias = (learned != null ? learned : latencyMinutes) * MINUTE; // tarda en dormirse
   const endBias = 5 * MINUTE; // tarda en coger el móvil
@@ -825,8 +819,11 @@ export function evaluateGaps(
     }
 
     const trimmed = trimGap(gap, habit);
-    let { start } = trimmed;
-    const { end } = trimmed;
+    let { start, end } = trimmed;
+    // El final nunca va después del primer uso sostenido que deja una noche
+    // entera por detrás: lo que viene luego es la mañana con el móvil en la mano.
+    const firstUse = ctx.events?.length ? firstSustainedUse(ctx.events, start + MIN_TAIL_MS, end) : null;
+    if (firstUse !== null && firstUse < end) end = firstUse;
     let inferred = trimmed.inferred;
 
     // El inicio nunca va antes del último uso real del móvil. Los huecos que no
@@ -882,6 +879,8 @@ export function evaluateGaps(
     habit,
     ctx.latencyMinutes,
   );
+  if (ctx.events?.length)
+    for (const r of fused) r.unlocks = unlocksIn(ctx.events, r.session.start, r.session.end);
   const merged: DetectionResult[] = [];
   for (const r of fused) {
     const { start, end } = r.session;
@@ -1043,9 +1042,16 @@ function pickMainNights(
  * cargador o «no molestar»; Doze es sólo la pantalla vista desde otro lado), o
  * con sensores, oscuridad y quietud totales.
  */
+/** Desbloqueos que aún caben en una siesta (mirar la hora una vez). */
+const NAP_MAX_UNLOCKS = 1;
+
 function napEvidence(r: DetectionResult): boolean {
   const triggers = new Set(r.session.triggers ?? []);
   const independent = (['screen', 'charger', 'dnd'] as TriggerId[]).filter((id) => triggers.has(id));
+  // Una siesta no se pasa desbloqueando el móvil: con datos reales, las tardes
+  // que el usuario negó traían 4-5 desbloqueos, y ninguna noche dormida tuvo
+  // más de uno dentro del sueño.
+  if (r.unlocks !== undefined && r.unlocks > NAP_MAX_UNLOCKS) return false;
   if (independent.length >= 2) return true;
   const ev = r.evidence;
   // Plano a plena luz es una mesa a la vista: ni siesta ni nada.
@@ -1141,70 +1147,6 @@ export async function collectNativeGaps(
   return results.map((r) => withDiscards(r, rejected));
 }
 
-/**
- * Disparador de horario: cuando una noche no ha dejado ninguna otra señal, se
- * propone la sesión que marcaría la meta del usuario, siempre con confianza
- * baja y a la espera de que la corrija. Es el último recurso, pensado para
- * quien duerme sin bloqueo de pantalla y pasa días sin abrir la app.
- *
- * Devuelve null si el disparador está apagado, si la noche todavía no ha
- * terminado, si ya hay algo registrado en esa franja o si ya se propuso antes.
- */
-export function proposeFromSchedule(
-  schedule: ScheduleSettings,
-  settings: MonitorSettings,
-  sessions: SleepSession[],
-  lastProposalKey: string | null,
-  now: number = Date.now(),
-): { result: DetectionResult; key: string } | null {
-  if (!triggerEnabled(settings, 'schedule')) return null;
-
-  // La noche que acaba de terminar es la de la última hora de despertar ya
-  // pasada: si la de hoy aún no ha llegado, se retrocede a la de ayer.
-  const wake = new Date(now);
-  const todayMins = parseTime(goalForDate(schedule, wake).wakeTime);
-  wake.setHours(Math.floor(todayMins / 60), todayMins % 60, 0, 0);
-  if (wake.getTime() > now) {
-    const yesterday = new Date(now - 24 * HOUR);
-    const mins = parseTime(goalForDate(schedule, yesterday).wakeTime);
-    wake.setTime(yesterday.getTime());
-    wake.setHours(Math.floor(mins / 60), mins % 60, 0, 0);
-  }
-
-  const wakeAt = wake.getTime();
-  // Se dejan pasar un par de horas desde la hora de despertar: si el usuario
-  // abre la app justo después, otra señal aún puede llegar y siempre es mejor.
-  if (now - wakeAt < 2 * HOUR || now - wakeAt > 36 * HOUR) return null;
-
-  const goal = goalForDate(schedule, wake);
-  const start = wakeAt - goal.targetHours * HOUR;
-  const key = wake.toDateString();
-  if (lastProposalKey === key) return null;
-
-  // Si algo cubre ya esa noche —detectado o registrado a mano— no hay nada que
-  // proponer: el horario sólo rellena las noches sin datos.
-  if (sessions.some((s) => start < s.end && s.start < wakeAt)) return null;
-
-  return {
-    key,
-    result: {
-      gapMs: wakeAt - start,
-      inferred: true,
-      session: {
-        id: `schedule-${wakeAt}`,
-        start,
-        end: wakeAt,
-        source: 'auto',
-        confidence: 'low',
-        confirmed: false,
-        triggers: ['schedule'],
-        // Es la meta del horario, no una medida: dudosa por construcción.
-        inferred: true,
-      },
-    },
-  };
-}
-
 /** Persiste el latido de actividad. */
 export async function beat(now: number = Date.now()): Promise<void> {
   await saveRaw(HEARTBEAT_KEY, String(now));
@@ -1218,14 +1160,6 @@ export async function readLastBeat(): Promise<number | null> {
   return Number.isFinite(n) ? n : null;
 }
 
-/** Última noche propuesta por horario, para no repetirla en cada apertura. */
-export async function readScheduleMark(): Promise<string | null> {
-  return loadRaw(SCHEDULE_MARK_KEY);
-}
-
-export async function writeScheduleMark(key: string): Promise<void> {
-  await saveRaw(SCHEDULE_MARK_KEY, key);
-}
 
 /** Anota en el registro la sesión que se acaba de proponer. */
 async function logDetection(result: DetectionResult): Promise<void> {
@@ -1257,12 +1191,6 @@ export interface MonitorCallbacks {
    */
   onDeviceUse?: (ts: number) => void;
   /**
-   * Una comprobación que no ha detectado nada. Es el punto donde el store
-   * decide si aplicar el disparador de horario, que necesita datos que este
-   * módulo no tiene (las metas y las sesiones ya registradas).
-   */
-  onQuiet?: (now: number) => void;
-  /**
    * Contexto de la evaluación: tu hábito y las noches que ya hay. Lo tiene el
    * store, que es quien conoce las sesiones; este módulo no.
    */
@@ -1280,7 +1208,7 @@ export function startMonitor(
 ): MonitorHandle {
   let stopped = false;
   const listeners: Array<() => void> = [];
-  const { onDetect, onBeat, onDeviceUse, onQuiet, getContext } = callbacks;
+  const { onDetect, onBeat, onDeviceUse, getContext } = callbacks;
 
   const check = async () => {
     if (stopped) return;
@@ -1341,7 +1269,6 @@ export function startMonitor(
 
     await beat(now);
     onBeat?.(now);
-    if (detected === 0 && settings.enabled && !stopped) onQuiet?.(now);
   };
 
   // Un latido periódico no evalúa huecos: sólo mantiene fresca la marca

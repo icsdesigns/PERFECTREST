@@ -74,8 +74,6 @@ interface Device {
   keyguardLocked: boolean;
   /** Estado de la pantalla, que el modelo va siguiendo. */
   interactive: boolean;
-  idle: boolean;
-  dnd: boolean;
 }
 
 /** SPEC: SleepMonitorService.REOPEN_GRACE_MS */
@@ -181,9 +179,6 @@ class ServiceModel {
   private userIsBack(now: number): void {
     this.watchingForUnlock = false;
     this.screenInUse(now);
-    // Doze puede haber salido ya con la pantalla apagada, o no haber salido
-    // todavía: en ambos casos el usuario está de vuelta.
-    this.close('idle', now, true);
   }
 
   /** SPEC: SleepMonitorService.screenInUse */
@@ -268,7 +263,7 @@ class ServiceModel {
     const dev = this.device;
     if (!dev.interactive || dev.keyguardLocked) return;
     this.advance(now);
-    if ((this.openAt.get('screen') ?? 0) <= 0 && (this.openAt.get('idle') ?? 0) <= 0) return;
+    if ((this.openAt.get('screen') ?? 0) <= 0) return;
     this.userIsBack(now);
   }
 
@@ -343,25 +338,11 @@ class ServiceModel {
         break;
 
       case 'IDLE_ON':
-        dev.idle = true;
-        this.open('idle', at, false);
-        break;
-
       case 'IDLE_OFF':
-        dev.idle = false;
-        // Salir de Doze con la pantalla apagada es una ventana de
-        // mantenimiento del sistema, no el usuario cogiendo el móvil.
-        if (dev.interactive) this.close('idle', at, true);
-        break;
-
       case 'DND_ON':
-        dev.dnd = true;
-        this.open('dnd', at, false);
-        break;
-
       case 'DND_OFF':
-        dev.dnd = false;
-        this.close('dnd', at, false);
+        // SPEC: el servicio ya no escucha Doze ni «no molestar» (retirados con
+        // datos reales): Android los emite, pero no abren ni cierran nada.
         break;
 
       case 'SERVICE_START':
@@ -371,8 +352,6 @@ class ServiceModel {
           this.abandonWakeUse();
           this.open('screen', at, false);
         } else if (dev.keyguardLocked) this.watchingForUnlock = true;
-        if (dev.idle) this.open('idle', at, false);
-        if (dev.dnd) this.open('dnd', at, false);
         break;
     }
   }
@@ -409,12 +388,11 @@ interface Night {
 
 const NIGHTS: Night[] = [
   {
-    // El caso que rompía todo: Doze no es un tramo continuo. Android sale del
-    // reposo profundo cada pocas horas para dejar correr las tareas
-    // pendientes y vuelve a entrar; la pantalla no se enciende y el usuario
-    // sigue durmiendo, pero el servicio lo veía como «ha vuelto al móvil».
+    // Android sale de Doze cada pocas horas para su ventana de mantenimiento.
+    // El servicio ya no escucha Doze, y esas salidas no deben partir la noche
+    // que mide la pantalla.
     name: 'noche normal con ventanas de mantenimiento de Doze',
-    triggers: ['screen', 'idle'],
+    triggers: ['screen'],
     device: { keyguardSecure: true, interactive: false },
     truth: { start: '2026-09-18T23:30:00', end: '2026-09-19T07:00:00' },
     summaries: 1,
@@ -465,40 +443,6 @@ const NIGHTS: Night[] = [
       ev('2026-09-18T23:20:00', 'SCREEN_OFF'),
       ev('2026-09-19T07:10:00', 'USER_PRESENT'),
       ev('2026-09-19T07:40:00', 'POWER_DISCONNECTED'),
-    ],
-  },
-  {
-    // Quien duerme sin bloqueo de pantalla depende sólo de Doze; los trozos
-    // que deja el mantenimiento tienen que unirse en una única noche.
-    name: 'sólo Doze, sin disparador de pantalla',
-    triggers: ['idle'],
-    device: { keyguardSecure: false, interactive: false },
-    truth: { start: '2026-09-18T23:50:00', end: '2026-09-19T07:05:00' },
-    summaries: 1,
-    events: [
-      ev('2026-09-18T23:50:00', 'IDLE_ON'),
-      ev('2026-09-19T02:30:00', 'IDLE_OFF'),
-      ev('2026-09-19T02:39:00', 'IDLE_ON'),
-      ev('2026-09-19T05:10:00', 'IDLE_OFF'),
-      ev('2026-09-19T05:18:00', 'IDLE_ON'),
-      ev('2026-09-19T07:05:00', 'SCREEN_ON'),
-      ev('2026-09-19T07:05:10', 'IDLE_OFF'),
-    ],
-  },
-  {
-    // «No molestar» expresa intención: quien lo enciende al acostarse está
-    // diciendo la hora. Aquí es la única señal, porque el móvil pasa la noche
-    // recibiendo avisos y nunca llega a entrar en Doze.
-    name: 'noche marcada sólo con «no molestar»',
-    triggers: ['dnd', 'screen'],
-    device: { keyguardSecure: true, interactive: false },
-    truth: { start: '2026-09-18T23:00:00', end: '2026-09-19T07:30:00' },
-    summaries: 1,
-    events: [
-      ev('2026-09-18T23:00:00', 'DND_ON'),
-      ev('2026-09-18T23:02:00', 'SCREEN_OFF'),
-      ev('2026-09-19T07:30:00', 'DND_OFF'),
-      ev('2026-09-19T07:31:00', 'USER_PRESENT'),
     ],
   },
   {
@@ -707,8 +651,6 @@ function runNight(night: Night): {
   const device: Device = {
     keyguardSecure: true,
     interactive: false,
-    idle: false,
-    dnd: false,
     keyguardLocked: false,
     ...night.device,
   };
@@ -797,8 +739,6 @@ function runEvents(events: Event[], device: Partial<Device> = {}): ServiceModel 
     keyguardSecure: true,
     keyguardLocked: true,
     interactive: false,
-    idle: false,
-    dnd: false,
     ...device,
   };
   const model = new ServiceModel(['screen'], 180 * 60_000, dev);
@@ -862,16 +802,17 @@ assert(
   curado.gaps,
 );
 
-// El fallo original, aislado: un fragmento de Doze no debe recortar la noche
+// El fallo original, aislado: un fragmento de otra señal (era Doze; ahora el
+// cargador, que también llega a trozos) no debe recortar la noche
 // que la pantalla midió entera. Con la fusión por intersección, el resultado
 // era el fragmento (3h15) más una segunda sesión inventada.
 const fragmentada: NativeGap[] = [
   { start: t('2026-09-18T23:30:00'), end: t('2026-09-19T07:00:00'), startTrigger: 'screen', endTrigger: 'screen' },
-  { start: t('2026-09-18T23:45:00'), end: t('2026-09-19T03:00:00'), startTrigger: 'idle', endTrigger: 'idle' },
-  { start: t('2026-09-19T03:08:00'), end: t('2026-09-19T07:00:00'), startTrigger: 'idle', endTrigger: 'idle' },
+  { start: t('2026-09-18T23:45:00'), end: t('2026-09-19T03:00:00'), startTrigger: 'charger', endTrigger: 'charger' },
+  { start: t('2026-09-19T03:08:00'), end: t('2026-09-19T07:00:00'), startTrigger: 'charger', endTrigger: 'charger' },
 ];
-const { results: fus } = evaluateGaps(fragmentada, MON);
-assert('un fragmento de Doze no recorta la noche de la pantalla', fus.length === 1, fus.length);
+const { results: fus } = evaluateGaps(fragmentada, { ...MON, triggers: { ...MON.triggers, charger: true } });
+assert('un fragmento del cargador no recorta la noche de la pantalla', fus.length === 1, fus.length);
 assert(
   'y la noche conserva sus 7h30',
   fus.length === 1 && fus[0].session.end - fus[0].session.start === 7.5 * 3_600_000,

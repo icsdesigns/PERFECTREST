@@ -94,18 +94,20 @@ activa por separado desde Ajustes ([`src/lib/triggers.ts`](src/lib/triggers.ts))
 | --- | --- | --- | --- | --- |
 | **Bloqueo del móvil** | pantalla apagada | desbloqueo real | APK | activo |
 | **Cargador** | lo enchufas | lo desenchufas | APK | apagado |
-| **Reposo profundo** | Android entra en Doze | sale de Doze | APK | activo |
-| **No molestar** | activas el filtro | lo quitas | APK | apagado |
 | **Apertura de la app** | última marca de actividad | vuelves a abrirla | siempre | activo |
-| **Horario objetivo** | — | — | siempre | apagado |
 
 Son independientes porque **cada uno se rompe por su lado**: la pantalla no
-dice nada de quien duerme sin bloqueo seguro, el cargador no sirve a quien no
-carga de noche, Doze no llega si el móvil recibe notificaciones toda la
-madrugada y «No molestar» sólo existe si el usuario lo usa. Lo que uno pierde,
-otro lo cubre.
+dice nada de quien duerme sin bloqueo seguro y el cargador no sirve a quien no
+carga de noche. Lo que uno pierde, otro lo cubre.
 
-Los cuatro primeros los mide un servicio en primer plano
+*Retirados con 18 noches reales.* Hubo tres disparadores más: **reposo
+profundo** (Doze), **«No molestar»** y **horario objetivo**. Doze sólo dejaba
+salidas sueltas cada seis horas y nunca abrió una noche; «No molestar» iba por
+horario (23:00-05:00), así que decía la hora del reloj y no el sueño; y el
+horario proponía la meta como noche, sueño deducido por el reloj. Las sesiones
+antiguas que los citan se siguen mostrando con los que quedan.
+
+Los dos primeros los mide un servicio en primer plano
 ([`SleepMonitorService.java`](android/app/src/main/java/com/perfectrest/app/SleepMonitorService.java)).
 Android sólo entrega `ACTION_SCREEN_OFF`, `ACTION_USER_PRESENT` y los eventos de
 carga a receptores registrados en código y mientras un componente siga vivo, por
@@ -118,33 +120,28 @@ detección se quedaba reducida a las aperturas de la app. Por la misma razón
 Ajustes ofrece **desactivar la optimización de batería**, que es la causa más
 común de que el servicio no llegue vivo a la mañana.
 
-El quinto es el respaldo: la app deja una marca temporal mientras está en
+El tercero es el respaldo: la app deja una marca temporal mientras está en
 primer plano y mide el hueco desde la última
 ([`src/lib/activityMonitor.ts`](src/lib/activityMonitor.ts)). Es lo único que
 funciona en el navegador, y depende de que mires el móvil poco antes de dormir y
 poco después de despertar.
 
-El sexto no mide nada: cuando una noche no ha dejado **ninguna** otra señal,
-propone la sesión que marca tu meta para que la corrijas a mano. Va siempre con
-confianza baja y viene desactivado de fábrica.
-
 **Sensores opcionales** ([`src/lib/sensors.ts`](src/lib/sensors.ts),
 [`SensorWatcher.java`](android/app/src/main/java/com/perfectrest/app/SensorWatcher.java)).
 Los disparadores miden cuándo se usa el móvil; los sensores miden qué pasa a su
-alrededor mientras no se usa. Se activan por separado en Ajustes, vienen
-apagados, no usan el micrófono y se degradan si falta el sensor o el permiso:
+alrededor mientras no se usa. Se activan por separado en Ajustes; **postura,
+pasos y luz vienen activos de fábrica** (con noches reales son los que mejor
+separan dormido de despierto, ver «Calibrado con 18 noches reales»), no usan el micrófono y se degradan si falta el sensor o el permiso:
 
 | Sensor | Qué registra | Para qué se usa |
 | --- | --- | --- |
 | **Pasos y movimiento** | contador de pasos con entrega diferida (permiso «Actividad física»; sin él, movimiento significativo) | inicio = fin de la última actividad; despertar = primeros pasos sostenidos |
 | **Luz ambiente** | cambios de nivel: oscuro / tenue / claro | la luz que se apaga marca el inicio; la oscuridad puntúa la confianza |
-| **Proximidad** | móvil tapado / libre (sólo la variante que no despierta el procesador) | actividad al cogerlo de nuevo; quietud |
-| **Próxima alarma** | `getNextAlarmClock`, sin permiso | si suena cerca del final, sube la confianza; con la pantalla encendida a esa hora, marca el despertar |
 | **Audio sonando** | `isMusicActive`, muestreado con el vigilante de 15 min | mientras suene aún no se ha dormido |
 | **Postura del móvil** | lecturas puntuales del acelerómetro: plano y quieto (boca arriba o abajo), inclinado y quieto, o en bolsillo/mano | plano y quieto es evidencia de quietud y sube la confianza; en bolsillo/mano aún no se duerme y el inicio se fija en el último momento así |
 
 Sin wakelocks permanentes: los sensores entregan en lotes de 10 minutos y la
-alarma y el audio sólo se consultan cuando el servicio ya está despierto. Todo
+el audio sólo se consulta cuando el servicio ya está despierto. Todo
 va al **registro bruto** (un evento por línea), que se cruza con cada hueco y se
 exporta en CSV o JSON desde Ajustes, junto al historial.
 
@@ -188,6 +185,40 @@ cada notificación pueden dar lecturas que no son lo que parecen, y por eso una
 lectura aislada nunca mueve nada. Boca abajo la luz marca «oscuro» siempre, así
 que la oscuridad de ese sensor no se corrige por la postura.
 
+*Calibrado con 18 noches reales* ([`scripts/rawbacktest.ts`](scripts/rawbacktest.ts),
+`PERFECTREST_EXPORT=/ruta/export.json PERFECTREST_NO_NAPS=1 npm run check`). Con un export de la app
+(registro bruto incluido) y la verdad que deja el comentario de cada noche:
+
+- **Plano con luz desde 10 lux, no 50.** Dormido, las lecturas boca arriba
+  dieron 0 lux en 65 de 65; despierto en casa por la noche, la luz de la
+  habitación daba 30-50 lux y contaba como oscuridad. Ninguna lectura entre 1 y
+  49 lux con el usuario dormido (`LUX_LIT_FLAT`).
+- **Una siesta no se pasa desbloqueando el móvil.** Las tardes que el usuario
+  negó traían 4-5 desbloqueos dentro; ninguna noche dormida tuvo más de uno. Con
+  más de uno (`NAP_MAX_UNLOCKS`) el hueco de fuera de hora no se propone como siesta.
+- **El final no pasa del primer uso sostenido** que deja una noche entera por
+  detrás (`firstSustainedUse`): una mañana de desbloqueos y pasos seguía
+  contando como sueño hasta las 11:23 cuando el primer uso fue a las 08:14.
+- El boca abajo es la postura del sueño en este usuario (88 % de las lecturas
+  dormido) y «en bolsillo/mano» casi no aparece dormido (5 de 665).
+- **Utilidad de cada sensor** (de noche, 716 lecturas dormido frente a 537
+  despierto; índice de 0,5 = no distingue a 1 = separa siempre): acelerómetro
+  y postura 0,88; aceleración lineal 0,85; luz 0,75-0,79; pasos 0,16 por hora
+  dormido frente a 3,9 despierto; audio 0,07 frente a 1,3; orientación,
+  giroscopio, magnetómetro, rotación y presión entre 0,55 y 0,64 (lo poco que
+  dicen ya lo dice el acelerómetro); proximidad 0,50 (siempre «libre»). La
+  «próxima alarma» cambiaba cada pocos minutos: era otra app, no el despertador.
+- **Retirado por no aportar**: los disparadores de Doze, «No molestar» y
+  horario; los sensores de proximidad y próxima alarma; y del contexto de cada
+  noche, batería, temperatura, red, modo avión, timbre, ahorro, Doze, «no
+  molestar», Bluetooth, brillo y orientación. Las lecturas agregadas de todos
+  los sensores se conservan en el archivo para seguir investigando.
+
+Resultado sobre las 16 noches con verdad: error medio del inicio de 3 min, las
+dos siestas falsas descartadas (en el registro no hubo ninguna siesta) y la noche del 13/11 (que la versión que la detectó
+empezaba a las 21:39) empieza a las 00:26 con la luz y la postura, frente a las
+00:00 reales.
+
 **Una noche no llega entera.** Ni el servicio ni la capa web pueden dar por
 buena la primera señal de vuelta que reciben, porque durante la noche llegan
 muchas que no lo son: Android sale de Doze cada pocas horas a su ventana de
@@ -222,7 +253,7 @@ confirmar, ajustar o descartar:
 La puntuación ya no mira sólo la duración y la hora: combina **duración**
 (6-10 h es lo más creíble), **cercanía a tu hora habitual** de acostarte y
 levantarte, **acuerdo entre disparadores independientes** y, si activas los
-sensores, **quietud** (pasos, movimiento y postura: móvil plano y quieto), **oscuridad** y **coincidencia con la alarma**. Las
+sensores, **quietud** (pasos, movimiento y postura: móvil plano y quieto) y **oscuridad**. Las
 evidencias que faltan no puntúan ni a favor ni en contra.
 
 **Afinar el inicio y el final** ([`src/lib/activityMonitor.ts`](src/lib/activityMonitor.ts)).
@@ -279,13 +310,12 @@ por el reloj. Ahora:
   defecto ni bloquea a las demás) y la sustituye cualquier propuesta medida que
   llegue después. Son inferidas: la noche colocada a la hora habitual en un hueco
   de más de 13 h sin datos, el último uso del móvil más de 90 min anterior a tu
-  hora de acostarte sin evidencia de quietud (con hábito aprendido) y la propuesta
-  del disparador de horario, que sigue siendo el último recurso.
+  hora de acostarte sin evidencia de quietud (con hábito aprendido).
 - **Un uso sostenido corta lo anterior.** El servicio sólo cierra el hueco de
   pantalla cuando el uso se sostiene (5 min de pantalla o 3 desbloqueos), y ya no
   lo *reanuda* si el móvil estuvo encendido ese rato: antes, doce minutos de móvil
   a las 22:30 tras soltarlo a las 22:00 devolvían el inicio a las 22:00. En la
-  capa web, los huecos del cargador, de Doze o de «no molestar» que abarquen un
+  capa web, los huecos del cargador que abarquen un
   uso sostenido (según el registro de pantalla, y sólo con desbloqueo: las
   pantallas que enciende una notificación no son uso) empiezan donde termina; y dos
   huecos de pantalla separados por uno ya no se funden salvo que el primero sea
@@ -336,7 +366,7 @@ Lo emite el servicio nativo y no la capa web a propósito: a las siete de la
 mañana la app lleva horas cerrada y no hay ningún JavaScript vivo que pueda
 avisar. El servicio avisa **una vez por noche**: una misma
 mañana cierra tantos huecos como disparadores activos haya —la pantalla al
-desbloquear, el cargador al desenchufar, «no molestar» al apagarse— y antes
+desbloquear y el cargador al desenchufar— y antes
 llegaban dos o tres avisos seguidos diciendo duraciones distintas de la misma
 noche. El filtro del servicio es laxo —el umbral mínimo y un extremo dentro de
 la ventana nocturna—; la evaluación fina (confianza, fusión de disparadores,
@@ -375,12 +405,11 @@ valores al inicio y al final):
 | --- | --- |
 | Aparato | Modelo y fabricante, `SDK_INT` y versión de Android, versión de la app, idioma, zona horaria y desfase UTC al dormirte, qué sensores trae el móvil, exención de batería / alarmas exactas / notificaciones |
 | Pantalla | Encendidos, desbloqueos, encendidos sin desbloquear (notificaciones), micro-despertares de la noche, duración de cada uso (hasta 20), uso total y máximo, si estaba encendida al dormirte y al despertar |
-| Batería y carga | Enchufes y desenchufes, % del tramo enchufado, tipo de carga (pared, USB, inalámbrica, base), nivel de batería (inicio, fin, mín., máx.), temperatura mín. y máx. |
-| Sistema | % del tramo en Doze, en ahorro de energía y en modo avión; filtro de «no molestar» (inicio y fin); modo del timbre (silencio, vibrar, normal); tipo de red y % sin conexión; nº de dispositivos Bluetooth **de audio** conectados; brillo; orientación |
-| Sensores | Los que tengas activos para detectar: pasos y movimiento, luz (% oscuro/tenue/claro y lux mín./máx.), proximidad, postura. Siempre que haya datos: audio sonando y alarma (hora, si sonó, se canceló o no hubo actividad) |
+| Carga | Enchufes y desenchufes, % del tramo enchufado, tipo de carga (pared, USB, inalámbrica, base) |
+| Sensores | Los que tengas activos para detectar: pasos y movimiento, luz (% oscuro/tenue/claro y lux mín./máx.), postura. Siempre que haya datos: audio sonando |
 | Cómo se detectó | Disparadores, confianza y puntuación, `inferred`, hueco medido, cuánto movió el refinado el inicio y el final, latencia usada y de dónde salió, hábito aprendido en ese momento, evidencia de los sensores y motivo de descarte de los otros huecos de la noche |
 | Servicio | Reinicios por el sistema y errores durante el tramo |
-| Línea de tiempo | Hasta 40 eventos destacados (desbloqueos, enchufes, modo avión, cambios de timbre…) con su minuto respecto al inicio |
+| Línea de tiempo | Hasta 40 eventos destacados (desbloqueos, enchufes, tipo de carga) con su minuto respecto al inicio |
 
 **Qué no se guarda, nunca:** ubicación, nombre de la red Wi-Fi (SSID) ni de
 ninguna red, nombres ni direcciones de dispositivos Bluetooth, contenido de
@@ -616,7 +645,7 @@ aprender de una hora que salió del propio hábito lo reforzaría a sí mismo.
   aprendidos, la noche principal por día, los micro-despertares, la confianza
   combinada, los sensores —con la postura del móvil—, el inicio dudoso sin
   evidencia de quietud y el corte por uso sostenido. También el contexto del
-  dispositivo: el resumen de una noche sintética (pantalla, carga, red, alarma,
+  dispositivo: el resumen de una noche sintética (pantalla, carga y
   sensores), que 3000 eventos no pasen de 8 KB, que no haya campos de ubicación,
   SSID ni identificadores, la migración y la poda a 120 noches, el CSV y el JSON
   con contexto, la traza del algoritmo, que los eventos nuevos no muevan la
@@ -655,12 +684,12 @@ La suite de noches existe porque las otras entraban por la mitad de la tubería:
 le daban a `evaluateGap` un hueco limpio de 23:30 a 07:00 que se inventaba la
 propia prueba. Una noche real no produce eso, produce media docena de trozos, y
 ahí estaba el fallo. Cada escenario es una ristra de eventos del sistema
-—apagados de pantalla, entradas y salidas de Doze, cargador, «no molestar»,
-muertes del servicio— que recorre un modelo de `SleepMonitorService` y después
+—apagados de pantalla, entradas y salidas de Doze (que el servicio ya no
+escucha), cargador, muertes del servicio— que recorre un modelo de `SleepMonitorService` y después
 el código real de evaluación y fusión, y se compara el resultado con lo que el
 usuario durmió de verdad. Cubre la noche con ventanas de mantenimiento de Doze,
 la que se pasa sin bloqueo seguro con la pantalla encendiéndose sola, la del
-cargador, la de sólo «no molestar», el servicio muerto y rearmado a mitad y el
+cargador, el servicio muerto y rearmado a mitad y el
 despertar breve de madrugada.
 
 El modelo del servicio es la parte frágil: está en Java y no se puede importar,

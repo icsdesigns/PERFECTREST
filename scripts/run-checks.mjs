@@ -21,6 +21,8 @@ const suites = [
   { name: 'precision', entry: 'scripts/precisioncheck.ts' },
   // Las horas del historial etiquetado son hora de pared de Madrid.
   { name: 'backtest', entry: 'scripts/backtest.ts', env: { TZ: 'Europe/Madrid' } },
+  // Sólo corre con PERFECTREST_EXPORT=/ruta/export.json (un export de la app).
+  { name: 'rawbacktest', entry: 'scripts/rawbacktest.ts', env: { TZ: 'Europe/Madrid' } },
   { name: 'render', entry: 'scripts/rendercheck.tsx' },
 ];
 
